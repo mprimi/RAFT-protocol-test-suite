@@ -1141,70 +1141,265 @@ func TestHandleAppendEntriesResponse(t *testing.T) {
 	// update match/next index
 	t.Run("successful", func(t *testing.T) {
 		testCases := []struct {
+			description        string
 			initialLeaderLog   []*Entry
 			initialNextIndex   uint64
 			initialMatchIndex  uint64
 			expectedNextIndex  uint64
-			expectedMatchIndex uint64
+			responseMatchIndex uint64
 		}{
 			{
-				[]*Entry{},
-				1,
-				0,
-				1,
-				0,
+				description:        "valid response to heartbeat with empty log",
+				initialLeaderLog:   []*Entry{},
+				initialNextIndex:   1,
+				initialMatchIndex:  0,
+				expectedNextIndex:  1,
+				responseMatchIndex: 0,
 			},
 			{
-				[]*Entry{
+				description: "valid response to request with one entry",
+				initialLeaderLog: []*Entry{
 					{Term: 1, Cmd: []byte("foo")},
 					{Term: 1, Cmd: []byte("bar")},
 					{Term: 2, Cmd: []byte("baz")},
 					{Term: 4, Cmd: []byte("faz")},
 				},
-				5,
-				4,
-				6,
-				5,
+				initialNextIndex:   4,
+				initialMatchIndex:  3,
+				expectedNextIndex:  5,
+				responseMatchIndex: 4,
 			},
 			{
-				[]*Entry{
+				description: "valid response to heartbeat with non-empty log",
+				initialLeaderLog: []*Entry{
 					{Term: 1, Cmd: []byte("foo")},
 					{Term: 1, Cmd: []byte("bar")},
 					{Term: 2, Cmd: []byte("baz")},
 					{Term: 4, Cmd: []byte("faz")},
 				},
-				5,
-				4,
-				5,
-				4,
+				initialNextIndex:   5,
+				initialMatchIndex:  4,
+				expectedNextIndex:  5,
+				responseMatchIndex: 4,
 			},
 		}
 
 		for _, testCase := range testCases {
 
-			dummyNetwork.lastMessageSent = nil
-			initialTerm := uint64(5)
-			raftNode = createRaftNode(id, initialTerm, Leader, testCase.initialLeaderLog)
+			t.Run(testCase.description, func(t *testing.T) {
 
-			raftNode.followersStateMap[otherPeerId].nextIndex = testCase.initialNextIndex
-			raftNode.followersStateMap[otherPeerId].matchIndex = testCase.initialMatchIndex
+				dummyNetwork.lastMessageSent = nil
+				leaderTerm := uint64(5)
+				raftNode = createRaftNode(id, leaderTerm, Leader, testCase.initialLeaderLog)
+				initialCommitIndex := raftNode.commitIndex
 
-			sendAppendEntriesResponse(&AppendEntriesResponse{
-				Term:        initialTerm,
-				Success:     true,
-				ResponderId: otherPeerId,
-				MatchIndex:  testCase.expectedMatchIndex,
+				raftNode.followersStateMap[otherPeerId].nextIndex = testCase.initialNextIndex
+				raftNode.followersStateMap[otherPeerId].matchIndex = testCase.initialMatchIndex
+
+				sendAppendEntriesResponse(&AppendEntriesResponse{
+					Term:        leaderTerm,
+					Success:     true,
+					ResponderId: otherPeerId,
+					MatchIndex:  testCase.responseMatchIndex,
+				})
+
+				// leader state
+				assertEqual(t, raftNode.state, Leader)
+				assertEqual(t, raftNode.storage.GetCurrentTerm(), leaderTerm)
+				// updated next and match index
+				assertEqual(t, raftNode.followersStateMap[otherPeerId].nextIndex, testCase.expectedNextIndex)
+				assertEqual(t, raftNode.followersStateMap[otherPeerId].matchIndex, testCase.responseMatchIndex)
+				assertEqual(t, raftNode.commitIndex, initialCommitIndex)
+
 			})
-
-			// leader state
-			assertEqual(t, raftNode.state, Leader)
-			assertEqual(t, raftNode.storage.GetCurrentTerm(), initialTerm)
-			// updated next and match index
-			assertEqual(t, raftNode.followersStateMap[otherPeerId].nextIndex, testCase.expectedNextIndex)
-			assertEqual(t, raftNode.followersStateMap[otherPeerId].matchIndex, testCase.expectedMatchIndex)
-
 		}
 
 	})
+
+}
+
+func TestUpdateLeaderCommitIndex(t *testing.T) {
+
+	dummyNetwork := &TestNetwork{}
+
+	const (
+		leaderPeerId           = "LEADER"
+		responderPeerId        = "RESPONDER"
+		otherPeerId            = "OTHER_PEER"
+		LEADER_TERM     uint64 = 4
+	)
+
+	var (
+		leader *RaftNodeImpl
+	)
+
+	createLeader := func(id string, term uint64, commitIndex uint64, initLog []*Entry, initFollowerMap map[string]*FollowerState) *RaftNodeImpl {
+		rn := &RaftNodeImpl{
+			id:                      id,
+			stateMachine:            nil,
+			quitCh:                  make(chan bool),
+			inboundMessages:         make(chan []byte, 1000),
+			network:                 dummyNetwork,
+			state:                   Leader,
+			storage:                 NewInMemoryStorage(),
+			peers:                   map[string]bool{id: true, responderPeerId: true, otherPeerId: true},
+			electionTimeoutDuration: 10 * time.Hour,
+			electionTimer:           time.NewTimer(10 * time.Hour),
+			voteMap:                 nil,
+			followersStateMap:       initFollowerMap,
+			commitIndex:             commitIndex,
+			lastApplied:             0,
+		}
+		if term > 0 {
+			rn.storage.SetTerm(term)
+		}
+		for _, entry := range initLog {
+			rn.storage.AppendEntry(entry)
+		}
+		return rn
+	}
+
+	sendAppendEntriesResponse := func(aeReq *AppendEntriesResponse) {
+		msg := Envelope{
+			OperationType: AppendEntriesResponseOp,
+			Payload:       aeReq.Bytes(),
+		}
+		leader.inboundMessages <- msg.Bytes()
+		leader.processOneTransistion()
+	}
+
+	// NOTE: AppendEntriesResponses will always come from Peer1
+	testCases := []struct {
+		description               string
+		initialLeaderLog          []*Entry
+		initialFollowerMap        map[string]*FollowerState
+		initialLeaderCommitIndex  uint64
+		responseMatchIndex        uint64
+		expectedLeaderCommitIndex uint64
+	}{
+		{
+			description:              "heartbeat with empty log",
+			initialLeaderLog:         []*Entry{},
+			initialLeaderCommitIndex: 0,
+			initialFollowerMap: map[string]*FollowerState{
+				leaderPeerId: {
+					nextIndex:  1,
+					matchIndex: 0,
+				},
+				responderPeerId: {
+					nextIndex:  1,
+					matchIndex: 0,
+				},
+				otherPeerId: {
+					nextIndex:  1,
+					matchIndex: 0,
+				},
+			},
+			responseMatchIndex:        0,
+			expectedLeaderCommitIndex: 0,
+		},
+		{
+			description: "follower is caught up, commit all entries",
+			initialLeaderLog: []*Entry{
+				{Term: 1, Cmd: []byte("foo")},
+				{Term: 1, Cmd: []byte("bar")},
+				{Term: 2, Cmd: []byte("baz")},
+				{Term: 4, Cmd: []byte("faz")},
+			},
+			initialLeaderCommitIndex: 0,
+			initialFollowerMap: map[string]*FollowerState{
+				leaderPeerId: {
+					nextIndex:  5,
+					matchIndex: 4,
+				},
+				responderPeerId: {
+					nextIndex:  1,
+					matchIndex: 0,
+				},
+				otherPeerId: {
+					nextIndex:  1,
+					matchIndex: 0,
+				},
+			},
+			responseMatchIndex:        4,
+			expectedLeaderCommitIndex: 4,
+		},
+		{
+			description: "sent entries to responder before we received them ourselves, no quorum",
+			initialLeaderLog: []*Entry{
+				{Term: 1, Cmd: []byte("foo")},
+				{Term: 1, Cmd: []byte("bar")},
+				{Term: 2, Cmd: []byte("baz")},
+				{Term: 4, Cmd: []byte("faz")},
+			},
+			initialLeaderCommitIndex: 0,
+			initialFollowerMap: map[string]*FollowerState{
+				leaderPeerId: {
+					nextIndex:  1,
+					matchIndex: 0,
+				},
+				responderPeerId: {
+					nextIndex:  1,
+					matchIndex: 0,
+				},
+				otherPeerId: {
+					nextIndex:  1,
+					matchIndex: 0,
+				},
+			},
+			responseMatchIndex:        4,
+			expectedLeaderCommitIndex: 0,
+		},
+		{
+			description: "achieved quorum but cannot commit entry from previous term",
+			initialLeaderLog: []*Entry{
+				{Term: 1, Cmd: []byte("foo")},
+				{Term: 1, Cmd: []byte("bar")},
+				{Term: 2, Cmd: []byte("baz")},
+				{Term: 3, Cmd: []byte("faz")},
+			},
+			initialLeaderCommitIndex: 3,
+			initialFollowerMap: map[string]*FollowerState{
+				leaderPeerId: {
+					nextIndex:  5,
+					matchIndex: 4,
+				},
+				responderPeerId: {
+					nextIndex:  4,
+					matchIndex: 3,
+				},
+				otherPeerId: {
+					nextIndex:  4,
+					matchIndex: 3,
+				},
+			},
+			responseMatchIndex:        4,
+			expectedLeaderCommitIndex: 3,
+		},
+	}
+
+	for _, testCase := range testCases {
+
+		t.Run(testCase.description, func(t *testing.T) {
+
+			dummyNetwork.lastMessageSent = nil
+			leader = createLeader(leaderPeerId, LEADER_TERM, testCase.initialLeaderCommitIndex, testCase.initialLeaderLog, testCase.initialFollowerMap)
+
+			sendAppendEntriesResponse(&AppendEntriesResponse{
+				Term:        LEADER_TERM,
+				Success:     true,
+				ResponderId: responderPeerId,
+				MatchIndex:  testCase.responseMatchIndex,
+			})
+
+			// leader state
+			assertEqual(t, leader.state, Leader)
+			assertEqual(t, leader.storage.GetCurrentTerm(), LEADER_TERM)
+			// updated match index and commit index
+			assertEqual(t, leader.followersStateMap[responderPeerId].matchIndex, testCase.responseMatchIndex)
+			assertEqual(t, leader.commitIndex, testCase.expectedLeaderCommitIndex)
+
+		})
+	}
 
 }

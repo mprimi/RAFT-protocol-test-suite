@@ -111,13 +111,13 @@ func (rn *RaftNodeImpl) processOneTransistion() {
 			appendEntriesRequest := message.(*AppendEntriesRequest)
 			rn.Log("received AppendEntries request from %s", appendEntriesRequest.LeaderId)
 
-			// is valid peer
+			// peer is unknown, ignore request
 			if !rn.isKnownPeer(appendEntriesRequest.LeaderId) {
 				rn.Log("ignoring AppendEntries request from unknown peer: %s", appendEntriesRequest.LeaderId)
 				return
 			}
 
-			// higher term
+			// request has higher term, stepdown and update term
 			if appendEntriesRequest.Term > currentTerm {
 				// set new term to append entries request term
 				rn.Log("AppendEntries request with a higher term, currentTerm: %d, requestTerm: %d", currentTerm, appendEntriesRequest.Term)
@@ -139,7 +139,7 @@ func (rn *RaftNodeImpl) processOneTransistion() {
 				ResponderId: rn.id,
 				MatchIndex:  0,
 			}
-			// out-of-date request
+			// request's term is lower than current term, deny request
 			if appendEntriesRequest.Term < currentTerm {
 				rn.network.Send(appendEntriesRequest.LeaderId, aeResponse(resp).Bytes())
 				return
@@ -149,7 +149,6 @@ func (rn *RaftNodeImpl) processOneTransistion() {
 			if appendEntriesRequest.PrevLogIdx > 0 {
 				// no entry exists
 				entry, exists := rn.storage.GetLogEntry(appendEntriesRequest.PrevLogIdx)
-
 				if !exists {
 					rn.Log("no such entry at index %d", appendEntriesRequest.PrevLogIdx)
 					resp.Success = false
@@ -165,6 +164,7 @@ func (rn *RaftNodeImpl) processOneTransistion() {
 				}
 			}
 
+			// append entries from request
 			logEntryIdx := appendEntriesRequest.PrevLogIdx + 1
 			for i, entry := range appendEntriesRequest.Entries {
 				logEntryIdx += uint64(i)
@@ -185,6 +185,7 @@ func (rn *RaftNodeImpl) processOneTransistion() {
 				panic(err)
 			}
 
+			// update commit index
 			indexOfLastNewEntry := appendEntriesRequest.PrevLogIdx + uint64(len(appendEntriesRequest.Entries))
 			if appendEntriesRequest.LeaderCommitIdx > rn.commitIndex {
 				prevCommitIndex := rn.commitIndex
@@ -199,6 +200,17 @@ func (rn *RaftNodeImpl) processOneTransistion() {
 			resp.MatchIndex = appendEntriesRequest.PrevLogIdx + uint64(len(appendEntriesRequest.Entries))
 			rn.network.Send(appendEntriesRequest.LeaderId, aeResponse(resp).Bytes())
 
+			if rn.commitIndex > rn.storage.GetLastLogIndex() {
+				panic(fmt.Sprintf("commit index %d is greater than last log index %d", rn.commitIndex, rn.storage.GetLastLogIndex()))
+			}
+
+			// apply newly committed entries
+			for i := rn.lastApplied + 1; i <= rn.commitIndex; i++ {
+				// TODO: apply entry log[i]
+				rn.Log("applying entry %d to state machine", i)
+			}
+			rn.lastApplied = rn.commitIndex
+
 		case AppendEntriesResponseOp:
 			appendEntriesResponse := message.(*AppendEntriesResponse)
 			rn.Log("received append entries response from %s", appendEntriesResponse.ResponderId)
@@ -212,8 +224,7 @@ func (rn *RaftNodeImpl) processOneTransistion() {
 				// set new term to vote request term
 				rn.Log("append entries response with a higher term: %d", appendEntriesResponse.Term)
 				rn.convertToFollowerDueToHigherTerm(appendEntriesResponse.Term)
-				// refresh value
-				currentTerm = rn.storage.GetCurrentTerm()
+				return
 			}
 
 			if rn.state != Leader {
@@ -231,12 +242,17 @@ func (rn *RaftNodeImpl) processOneTransistion() {
 				panic(fmt.Sprintf("responder %s is a valid peer but was not found in followers state map", appendEntriesResponse.ResponderId))
 			}
 
+			matchIndexUpdated := false
 			if appendEntriesResponse.Success {
 				if appendEntriesResponse.MatchIndex < followerState.matchIndex {
 					panic(fmt.Sprintf("match index %d is less than follower match index %d", appendEntriesResponse.MatchIndex, followerState.matchIndex))
+				} else if followerState.matchIndex == appendEntriesResponse.MatchIndex {
+					// match index didn't change
+				} else {
+					matchIndexUpdated = true
+					followerState.matchIndex = appendEntriesResponse.MatchIndex
+					followerState.nextIndex = followerState.matchIndex + 1
 				}
-				followerState.matchIndex = appendEntriesResponse.MatchIndex
-				followerState.nextIndex = followerState.matchIndex + 1
 			} else {
 				// NOTE: this only executes if log doesn't match
 				if followerState.nextIndex == 1 {
@@ -253,7 +269,6 @@ func (rn *RaftNodeImpl) processOneTransistion() {
 					panic(fmt.Sprintf("no log entry at index %d", prevLogIndex))
 				}
 
-				// TODO: send entries
 				entries := rn.entriesToSendToFollower(appendEntriesResponse.ResponderId)
 				rn.SendMessage(appendEntriesResponse.ResponderId, &AppendEntriesRequest{
 					Term:            currentTerm,
@@ -265,6 +280,45 @@ func (rn *RaftNodeImpl) processOneTransistion() {
 				})
 
 				// TODO: reset timer?
+			}
+
+			// commit index only is incremented if matchIndex has been changed
+			if matchIndexUpdated {
+				if currentTerm != rn.storage.GetCurrentTerm() {
+					panic(fmt.Sprintf("unexpected term change while handling AE response, expected: %d, actual: %d", currentTerm, rn.storage.GetCurrentTerm()))
+				}
+
+				quorum := len(rn.peers)/2 + 1
+				lastLogIndex := rn.storage.GetLastLogIndex()
+
+				upperBound := min(appendEntriesResponse.MatchIndex, lastLogIndex)
+				lowerBound := rn.commitIndex + 1
+
+				for n := upperBound; n >= lowerBound; n-- {
+
+					logEntry, exists := rn.storage.GetLogEntry(n)
+					if !exists {
+						panic(fmt.Sprintf("log entry at %d, doesn't exist", n))
+					}
+
+					// NOTE: as an optimization we could just break here since it is guaranteed that all entries previous to this will have lower terms than us
+					if currentTerm != logEntry.Term {
+						rn.Log("cannot set commitIndex to %d, term mismatch", n)
+						continue
+					}
+					// count how many peer's log matches leader's upto N
+					count := 0
+					for _, followerState := range rn.followersStateMap {
+						if followerState.matchIndex >= n {
+							count++
+						}
+					}
+					// majority of peers has entry[n], commit entries up to N
+					if count >= quorum {
+						rn.commitIndex = n
+						break
+					}
+				}
 			}
 
 		// TODO: handle up-to-date clause
