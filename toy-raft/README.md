@@ -1,0 +1,11 @@
+## TODO
+- [ ] timers (election, heartbeat)
+- [ ] e2e integration tests w/ sync statemachine
+- [ ] snapshotting
+- [ ] log compaction
+- [ ] cluster membership changes
+- [ ] async apply to statemachine
+- [ ] integration tests
+- [ ] lossy network impl.
+- [ ] disk based log
+- [ ] 
