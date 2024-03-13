@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"reflect"
 	"testing"
-	"time"
 	"toy-raft/network"
 )
 
@@ -98,15 +97,12 @@ func TestRaftStepDownDueToHigherTerm(t *testing.T) {
 			id := "a"
 			otherId := "b"
 			raftNode := &RaftNodeImpl{
-				id:                      id,
-				inboundMessages:         make(chan []byte, 1000),
-				state:                   c.initialState,
-				storage:                 NewInMemoryStorage(),
-				electionTimeoutDuration: 10 * time.Second,
-				// this should not fire for the duration of the test
-				electionTimer: time.NewTimer(10 * time.Hour),
-				voteMap:       nil,
-				network:       dummyNetwork,
+				id:              id,
+				inboundMessages: make(chan []byte, 1000),
+				state:           c.initialState,
+				storage:         NewInMemoryStorage(),
+				voteMap:         nil,
+				network:         dummyNetwork,
 				peers: map[string]bool{
 					id:      true,
 					otherId: true,
@@ -186,15 +182,12 @@ func TestConvertToCandidate(t *testing.T) {
 
 	id := "a"
 	raftNode := &RaftNodeImpl{
-		id:                      id,
-		inboundMessages:         make(chan []byte, 1000),
-		state:                   Follower, // could be candidate
-		storage:                 NewInMemoryStorage(),
-		electionTimeoutDuration: 10 * time.Second,
-		// this should not fire for the duration of the test
-		electionTimer: time.NewTimer(10 * time.Hour),
-		voteMap:       nil,
-		network:       dummyNetwork,
+		id:              id,
+		inboundMessages: make(chan []byte, 1000),
+		state:           Follower, // could be candidate
+		storage:         NewInMemoryStorage(),
+		voteMap:         nil,
+		network:         dummyNetwork,
 	}
 	previousTerm := raftNode.storage.GetCurrentTerm()
 
@@ -232,9 +225,6 @@ func TestAscendToLeadership(t *testing.T) {
 		inboundMessages:         make(chan []byte, 1000),
 		state:                   Follower, // could be candidate
 		storage:                 NewInMemoryStorage(),
-		electionTimeoutDuration: 10 * time.Hour,
-		// this should not fire for the duration of the test
-		electionTimer:     time.NewTimer(10 * time.Hour),
 		voteMap:           nil,
 		followersStateMap: nil,
 		peers: map[string]bool{
@@ -431,8 +421,6 @@ func TestFollowerHandleAppendEntries(t *testing.T) {
 			state:                   state,
 			storage:                 NewInMemoryStorage(),
 			peers:                   map[string]bool{id: true, leaderId: true, "c": true, "d": true, "e": true},
-			electionTimeoutDuration: 10 * time.Hour,
-			electionTimer:           time.NewTimer(10 * time.Hour),
 			voteMap:                 nil,
 			commitIndex:             commitIdx,
 			lastApplied:             0,
@@ -745,8 +733,6 @@ func TestHandleVoteRequest(t *testing.T) {
 			state:                   state,
 			storage:                 NewInMemoryStorage(),
 			peers:                   map[string]bool{id: true, candidateId: true, "c": true, "d": true, "e": true},
-			electionTimeoutDuration: 10 * time.Hour,
-			electionTimer:           time.NewTimer(10 * time.Hour),
 			voteMap:                 nil,
 			followersStateMap:       nil,
 			commitIndex:             0,
@@ -959,8 +945,6 @@ func TestHandleAppendEntriesResponse(t *testing.T) {
 			state:                   state,
 			storage:                 NewInMemoryStorage(),
 			peers:                   map[string]bool{id: true, otherPeerId: true},
-			electionTimeoutDuration: 10 * time.Hour,
-			electionTimer:           time.NewTimer(10 * time.Hour),
 			voteMap:                 nil,
 			followersStateMap: map[string]*FollowerState{
 				id: {
@@ -1243,8 +1227,6 @@ func TestUpdateLeaderCommitIndex(t *testing.T) {
 			state:                   Leader,
 			storage:                 NewInMemoryStorage(),
 			peers:                   map[string]bool{id: true, responderPeerId: true, otherPeerId: true},
-			electionTimeoutDuration: 10 * time.Hour,
-			electionTimer:           time.NewTimer(10 * time.Hour),
 			voteMap:                 nil,
 			followersStateMap:       initFollowerMap,
 			commitIndex:             commitIndex,

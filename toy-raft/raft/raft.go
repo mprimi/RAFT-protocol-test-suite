@@ -36,10 +36,6 @@ type RaftNodeImpl struct {
 	// set of peers including self
 	peers map[string]bool
 
-	// Follower and Candidate
-	electionTimeoutDuration time.Duration
-	electionTimer           *time.Timer
-
 	// Candidate
 	voteMap map[string]bool
 
@@ -81,6 +77,7 @@ func parseMessage(messageBytes []byte) (OperationType, any, error) {
 
 func (rn *RaftNodeImpl) Start() {
 	go func() {
+		// FIX: start election timer
 		for {
 			select {
 			case <-rn.quitCh:
@@ -125,6 +122,8 @@ func (rn *RaftNodeImpl) processOneTransistion() {
 				// refresh value
 				currentTerm = rn.storage.GetCurrentTerm()
 			}
+
+			// FIX: reset election timer
 
 			aeResponse := func(appendEntriesResponse *AppendEntriesResponse) *Envelope {
 				return &Envelope{
@@ -341,6 +340,8 @@ func (rn *RaftNodeImpl) processOneTransistion() {
 				currentTerm = rn.storage.GetCurrentTerm()
 			}
 
+			// FIX: reset election timer
+
 			var voteGranted bool
 			if voteRequest.Term < currentTerm {
 				rn.Log("vote not granted to %s, voteRequestTerm %d < currentTerm %d", voteRequest.CandidateId, voteRequest.Term, currentTerm)
@@ -421,8 +422,9 @@ func (rn *RaftNodeImpl) processOneTransistion() {
 			}
 
 		}
-	case <-rn.electionTimer.C:
-		rn.convertToCandidate()
+		// FIX: replace with new timer
+		//case <-rn.electionTimer.C:
+		//rn.convertToCandidate()
 	}
 }
 
@@ -486,9 +488,12 @@ func (rn *RaftNodeImpl) ascendToLeader() {
 
 func (rn *RaftNodeImpl) convertToCandidate() {
 	rn.state = Candidate
+
 	// reset election timer
 	// TODO: drain the timer
-	rn.electionTimer.Reset(rn.electionTimeoutDuration)
+	// FIX: replace with new timer
+	//rn.electionTimer.Reset(rn.electionTimeoutDuration)
+
 	// reset vote map
 	rn.voteMap = make(map[string]bool)
 	// increment term
@@ -531,8 +536,7 @@ func (rn *RaftNodeImpl) convertToFollowerDueToHigherTerm(term uint64) {
 	// convert to follower
 	rn.state = Follower
 	// reset election timer so we can give candidate time to resolve election
-	// TODO: drain
-	rn.electionTimer.Reset(rn.electionTimeoutDuration)
+	// FIX: init election timer
 }
 
 func (rn *RaftNodeImpl) requestVotes(term uint64, candidateId string) {
