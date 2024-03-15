@@ -41,6 +41,7 @@ type RaftNodeImpl struct {
 
 	// Leader only
 	followersStateMap map[string]*FollowerState
+	leaderTimer       Timer
 
 	// All servers
 	// index of highest log entry known to be committed
@@ -77,7 +78,7 @@ func parseMessage(messageBytes []byte) (OperationType, any, error) {
 
 func (rn *RaftNodeImpl) Start() {
 	go func() {
-		// FIX: start election timer
+		//rn.leaderTimer.Start()
 		for {
 			select {
 			case <-rn.quitCh:
@@ -118,7 +119,7 @@ func (rn *RaftNodeImpl) processOneTransistion() {
 			if appendEntriesRequest.Term > currentTerm {
 				// set new term to append entries request term
 				rn.Log("AppendEntries request with a higher term, currentTerm: %d, requestTerm: %d", currentTerm, appendEntriesRequest.Term)
-				rn.convertToFollowerDueToHigherTerm(appendEntriesRequest.Term)
+				rn.stepdownDueToHigherTerm(appendEntriesRequest.Term)
 				// refresh value
 				currentTerm = rn.storage.GetCurrentTerm()
 			}
@@ -222,7 +223,7 @@ func (rn *RaftNodeImpl) processOneTransistion() {
 			if appendEntriesResponse.Term > currentTerm {
 				// set new term to vote request term
 				rn.Log("append entries response with a higher term: %d", appendEntriesResponse.Term)
-				rn.convertToFollowerDueToHigherTerm(appendEntriesResponse.Term)
+				rn.stepdownDueToHigherTerm(appendEntriesResponse.Term)
 				return
 			}
 
@@ -252,6 +253,7 @@ func (rn *RaftNodeImpl) processOneTransistion() {
 					followerState.matchIndex = appendEntriesResponse.MatchIndex
 					followerState.nextIndex = followerState.matchIndex + 1
 				}
+				// FIX: reset timer to max(0, interval-(now-aeTimestamp))
 			} else {
 				// NOTE: this only executes if log doesn't match
 				if followerState.nextIndex == 1 {
@@ -278,7 +280,8 @@ func (rn *RaftNodeImpl) processOneTransistion() {
 					LeaderCommitIdx: rn.commitIndex,
 				})
 
-				// TODO: reset timer?
+				// FIX: set aeTimestamp
+				// FIX: reset timer to timeoutDuration
 			}
 
 			// commit index only is incremented if matchIndex has been changed
@@ -335,7 +338,7 @@ func (rn *RaftNodeImpl) processOneTransistion() {
 			if voteRequest.Term > currentTerm {
 				// set new term to vote request term
 				rn.Log("vote request with a higher term, currentTerm: %d, voteRequestTerm: %d", currentTerm, voteRequest.Term)
-				rn.convertToFollowerDueToHigherTerm(voteRequest.Term)
+				rn.stepdownDueToHigherTerm(voteRequest.Term)
 				// refresh value
 				currentTerm = rn.storage.GetCurrentTerm()
 			}
@@ -383,7 +386,7 @@ func (rn *RaftNodeImpl) processOneTransistion() {
 			currentTerm := rn.storage.GetCurrentTerm()
 			if voteResponse.Term > currentTerm {
 				rn.Log("received vote response with a higher term, voteResponseTerm: %d", voteResponse.Term)
-				rn.convertToFollowerDueToHigherTerm(voteResponse.Term)
+				rn.stepdownDueToHigherTerm(voteResponse.Term)
 				return
 			} else if voteResponse.Term < currentTerm {
 				rn.Log("ignoring vote response from previous term %d", voteResponse.Term)
@@ -425,6 +428,24 @@ func (rn *RaftNodeImpl) processOneTransistion() {
 		// FIX: replace with new timer
 		//case <-rn.electionTimer.C:
 		//rn.convertToCandidate()
+		//case <-rn.candidateElectionTimeout.C:
+		//rn.convertToCandidate()
+	case <-time.After(10 * time.Millisecond):
+		// non-blocking
+	}
+	// HACK: replace with a proper subroutine dedicated to handling timers
+	if rn.state == Leader {
+		// FIX: check timer state
+		/*
+			for follower in followers:
+				select {
+					case <-follower.timer.C:
+					// send aeReq
+					// reset timer
+					// set aeTimestamp
+					default:
+				}
+		*/
 	}
 }
 
@@ -450,7 +471,7 @@ func (rn *RaftNodeImpl) ascendToLeader() {
 	rn.followersStateMap = make(map[string]*FollowerState, len(rn.peers))
 	for peerId := range rn.peers {
 		rn.followersStateMap[peerId] = &FollowerState{
-			// TODO: ticker init
+			// FIX: ticker init
 			nextIndex:  rn.storage.GetLastLogIndex() + 1,
 			matchIndex: 0,
 		}
@@ -483,16 +504,15 @@ func (rn *RaftNodeImpl) ascendToLeader() {
 	}
 	rn.network.Broadcast(envelope.Bytes())
 
-	// TODO: reset ticker for every follower
+	// FIX: start leaderTimer
+	// FIX: save timestamp of append entries request that was sent out, `aeTimestamp`
 }
 
 func (rn *RaftNodeImpl) convertToCandidate() {
 	rn.state = Candidate
 
-	// reset election timer
-	// TODO: drain the timer
-	// FIX: replace with new timer
-	//rn.electionTimer.Reset(rn.electionTimeoutDuration)
+	// candidate election timer
+	// FIX: reset/start candidateElectionTimeout timer
 
 	// reset vote map
 	rn.voteMap = make(map[string]bool)
@@ -505,7 +525,8 @@ func (rn *RaftNodeImpl) convertToCandidate() {
 	rn.requestVotes(currentTerm, rn.id)
 }
 
-func (rn *RaftNodeImpl) convertToFollowerDueToHigherTerm(term uint64) {
+// this method is triggered by receiving an RPC with a higher term, regardless of state
+func (rn *RaftNodeImpl) stepdownDueToHigherTerm(term uint64) {
 
 	previousState := rn.state
 
@@ -525,6 +546,7 @@ func (rn *RaftNodeImpl) convertToFollowerDueToHigherTerm(term uint64) {
 			panic("a candidate should have a vote map")
 		}
 		rn.voteMap = nil
+		// FIX: stop candidateElectionTimeout timer
 	} else {
 		if rn.voteMap != nil {
 			panic(fmt.Sprintf("a %s should not have a vote map", previousState))

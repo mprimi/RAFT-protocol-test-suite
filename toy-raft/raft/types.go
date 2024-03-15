@@ -102,12 +102,12 @@ func (ot OperationType) String() string {
 }
 
 type AppendEntriesRequest struct {
-	Term            uint64   `json:"term"`
-	LeaderId        string   `json:"leader_id"`
+	Term            uint64  `json:"term"`
+	LeaderId        string  `json:"leader_id"`
 	Entries         []Entry `json:"entries"`
-	PrevLogIdx      uint64   `json:"prev_log_idx"`
-	PrevLogTerm     uint64   `json:"prev_log_term"`
-	LeaderCommitIdx uint64   `json:"leader_commit_idx"`
+	PrevLogIdx      uint64  `json:"prev_log_idx"`
+	PrevLogTerm     uint64  `json:"prev_log_term"`
+	LeaderCommitIdx uint64  `json:"leader_commit_idx"`
 }
 
 func (aer *AppendEntriesRequest) Bytes() []byte {
@@ -215,7 +215,7 @@ func LoadVoteResponse(bytes []byte) VoteResponse {
 }
 
 type FollowerState struct {
-	// TODO: handle ticker
+	// FIX: replace with Ticker interface
 	heartbeatTicker *time.Ticker
 	// index of next log entry to send to each peer
 	nextIndex uint64
