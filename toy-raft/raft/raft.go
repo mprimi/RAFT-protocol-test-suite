@@ -3,16 +3,20 @@ package raft
 import (
 	"encoding/json"
 	"fmt"
+	"math/rand"
 	"time"
 	"toy-raft/network"
 	"toy-raft/state"
 )
 
 const (
-	updateChannelBufferSz int           = 10000
-	heartbeatInterval     time.Duration = 1 * time.Second
-	maxElectionTimeout    time.Duration = 5 * time.Second
-	minElectionTimeout    time.Duration = 2 * time.Second
+	updateChannelBufferSz          int           = 10000
+	heartbeatInterval              time.Duration = 3 * time.Second
+	aeResponseTimeoutDuration      time.Duration = 800 * time.Millisecond
+	voteResponseTimeoutDuration    time.Duration = 3 * time.Second
+	maxElectionTimeout             time.Duration = 5 * time.Second
+	minElectionTimeout             time.Duration = 2 * time.Second
+	initialElectionTimeoutDuration time.Duration = 1 * time.Second
 )
 
 type RaftOperation interface {
@@ -36,12 +40,15 @@ type RaftNodeImpl struct {
 	// set of peers including self
 	peers map[string]bool
 
+	// Follower
+	electionTimeoutTimer *time.Timer
+
 	// Candidate
-	voteMap map[string]bool
+	voteMap                  map[string]bool
+	voteResponseTimeoutTimer *time.Timer
 
 	// Leader only
 	followersStateMap map[string]*FollowerState
-	leaderTimer       Timer
 
 	// All servers
 	// index of highest log entry known to be committed
@@ -78,7 +85,7 @@ func parseMessage(messageBytes []byte) (OperationType, any, error) {
 
 func (rn *RaftNodeImpl) Start() {
 	go func() {
-		//rn.leaderTimer.Start()
+		resetAndDrainTimer(rn.electionTimeoutTimer, randomTimerDuration(1, initialElectionTimeoutDuration))
 		for {
 			select {
 			case <-rn.quitCh:
@@ -123,8 +130,8 @@ func (rn *RaftNodeImpl) processOneTransistion() {
 				// refresh value
 				currentTerm = rn.storage.GetCurrentTerm()
 			}
-
-			// FIX: reset election timer
+			// refresh election timer
+			resetAndDrainTimer(rn.electionTimeoutTimer, randomTimerDuration(minElectionTimeout, maxElectionTimeout))
 
 			aeResponse := func(appendEntriesResponse *AppendEntriesResponse) *Envelope {
 				return &Envelope{
@@ -253,7 +260,9 @@ func (rn *RaftNodeImpl) processOneTransistion() {
 					followerState.matchIndex = appendEntriesResponse.MatchIndex
 					followerState.nextIndex = followerState.matchIndex + 1
 				}
-				// FIX: reset timer to max(0, interval-(now-aeTimestamp))
+				// reset timer
+				timerDuration := max(1, heartbeatInterval-(time.Since(followerState.aeTimestamp)))
+				resetAndDrainTimer(followerState.timer, timerDuration)
 			} else {
 				// NOTE: this only executes if log doesn't match
 				if followerState.nextIndex == 1 {
@@ -279,9 +288,8 @@ func (rn *RaftNodeImpl) processOneTransistion() {
 					PrevLogTerm:     prevLogEntry.Term,
 					LeaderCommitIdx: rn.commitIndex,
 				})
-
-				// FIX: set aeTimestamp
-				// FIX: reset timer to timeoutDuration
+				followerState.aeTimestamp = time.Now()
+				resetAndDrainTimer(followerState.timer, aeResponseTimeoutDuration)
 			}
 
 			// commit index only is incremented if matchIndex has been changed
@@ -343,7 +351,7 @@ func (rn *RaftNodeImpl) processOneTransistion() {
 				currentTerm = rn.storage.GetCurrentTerm()
 			}
 
-			// FIX: reset election timer
+			resetAndDrainTimer(rn.electionTimeoutTimer, randomTimerDuration(minElectionTimeout, maxElectionTimeout))
 
 			var voteGranted bool
 			if voteRequest.Term < currentTerm {
@@ -425,27 +433,45 @@ func (rn *RaftNodeImpl) processOneTransistion() {
 			}
 
 		}
-		// FIX: replace with new timer
-		//case <-rn.electionTimer.C:
-		//rn.convertToCandidate()
-		//case <-rn.candidateElectionTimeout.C:
-		//rn.convertToCandidate()
+	case <-rn.electionTimeoutTimer.C:
+		if rn.state != Follower {
+			panic(fmt.Sprintf("vote response timeout while in state %s", rn.state))
+		}
+		rn.convertToCandidate()
+	case <-rn.voteResponseTimeoutTimer.C:
+		if rn.state != Candidate {
+			panic(fmt.Sprintf("vote response timeout while in state %s", rn.state))
+		}
+		rn.convertToCandidate()
+
+	// HACK: once we have a proper subroutine for handling timers, we can remove this
 	case <-time.After(10 * time.Millisecond):
 		// non-blocking
 	}
 	// HACK: replace with a proper subroutine dedicated to handling timers
 	if rn.state == Leader {
-		// FIX: check timer state
-		/*
-			for follower in followers:
-				select {
-					case <-follower.timer.C:
-					// send aeReq
-					// reset timer
-					// set aeTimestamp
-					default:
+		for followerId, followerState := range rn.followersStateMap {
+			select {
+			case <-followerState.timer.C:
+				prevLogIndex := followerState.nextIndex - 1
+				prevLogEntry, exists := rn.storage.GetLogEntry(prevLogIndex)
+				if !exists {
+					panic(fmt.Sprintf("no log entry at index %d", prevLogIndex))
 				}
-		*/
+				rn.SendMessage(followerId, &AppendEntriesRequest{
+					Term:            currentTerm,
+					LeaderId:        rn.id,
+					Entries:         rn.entriesToSendToFollower(followerId),
+					PrevLogIdx:      prevLogIndex,
+					PrevLogTerm:     prevLogEntry.Term,
+					LeaderCommitIdx: rn.commitIndex,
+				})
+				resetAndDrainTimer(followerState.timer, aeResponseTimeoutDuration)
+				followerState.aeTimestamp = time.Now()
+			default:
+				// do nothing
+			}
+		}
 	}
 }
 
@@ -464,16 +490,18 @@ func (rn *RaftNodeImpl) ascendToLeader() {
 
 	// transistion to leader
 	rn.state = Leader
-
 	// clear vote map
 	rn.voteMap = nil
+	// stop voteResponseTimeoutTimer
+	stopAndDrain(rn.voteResponseTimeoutTimer)
 
 	rn.followersStateMap = make(map[string]*FollowerState, len(rn.peers))
 	for peerId := range rn.peers {
 		rn.followersStateMap[peerId] = &FollowerState{
-			// FIX: ticker init
 			nextIndex:  rn.storage.GetLastLogIndex() + 1,
 			matchIndex: 0,
+			// NOTE: we don't want this to fire, this is being reset anyway soon
+			timer: time.NewTimer(100 * time.Hour),
 		}
 	}
 
@@ -490,6 +518,7 @@ func (rn *RaftNodeImpl) ascendToLeader() {
 	}
 
 	// send initial empty AppendEntriesRequest to each peer
+	// TODO: replace w/ fn
 	newLeaderAEReq := &AppendEntriesRequest{
 		Term:            rn.storage.GetCurrentTerm(),
 		LeaderId:        rn.id,
@@ -504,15 +533,17 @@ func (rn *RaftNodeImpl) ascendToLeader() {
 	}
 	rn.network.Broadcast(envelope.Bytes())
 
-	// FIX: start leaderTimer
-	// FIX: save timestamp of append entries request that was sent out, `aeTimestamp`
+	for _, followerState := range rn.followersStateMap {
+		followerState.aeTimestamp = time.Now()
+		resetAndDrainTimer(followerState.timer, aeResponseTimeoutDuration)
+	}
 }
 
 func (rn *RaftNodeImpl) convertToCandidate() {
 	rn.state = Candidate
 
 	// candidate election timer
-	// FIX: reset/start candidateElectionTimeout timer
+	resetAndDrainTimer(rn.voteResponseTimeoutTimer, voteResponseTimeoutDuration)
 
 	// reset vote map
 	rn.voteMap = make(map[string]bool)
@@ -545,8 +576,10 @@ func (rn *RaftNodeImpl) stepdownDueToHigherTerm(term uint64) {
 		if rn.voteMap == nil {
 			panic("a candidate should have a vote map")
 		}
+		// clear vote map
 		rn.voteMap = nil
-		// FIX: stop candidateElectionTimeout timer
+		// stop vote response timer
+		stopAndDrain(rn.voteResponseTimeoutTimer)
 	} else {
 		if rn.voteMap != nil {
 			panic(fmt.Sprintf("a %s should not have a vote map", previousState))
@@ -634,4 +667,24 @@ func (rn *RaftNodeImpl) entriesToSendToFollower(followerId string) []Entry {
 		return rn.storage.GetLogEntriesFrom(rn.followersStateMap[followerId].nextIndex)
 	}
 	return []Entry{}
+}
+
+func resetAndDrainTimer(t *time.Timer, resetDuration time.Duration) {
+	stopAndDrain(t)
+	t.Reset(resetDuration)
+}
+
+func stopAndDrain(t *time.Timer) {
+	t.Stop()
+	for {
+		select {
+		case <-t.C:
+		default:
+			return
+		}
+	}
+}
+
+func randomTimerDuration(min time.Duration, max time.Duration) time.Duration {
+	return min + time.Duration(rand.Float64()*(float64(max-min)))
 }

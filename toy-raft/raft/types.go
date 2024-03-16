@@ -215,10 +215,13 @@ func LoadVoteResponse(bytes []byte) VoteResponse {
 }
 
 type FollowerState struct {
-	// FIX: replace with Ticker interface
-	heartbeatTicker *time.Ticker
 	// index of next log entry to send to each peer
 	nextIndex uint64
 	// index of highest log entry known to be replicated on server
 	matchIndex uint64
+	// timer for rpc retrys and heartbeats
+	timer *time.Timer
+	// timestamp of AppendEntries request that was last sent  to the follower
+	aeTimestamp time.Time
 }
+
