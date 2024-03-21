@@ -133,13 +133,6 @@ func (rn *RaftNodeImpl) processOneTransistion() {
 			// refresh election timer
 			resetAndDrainTimer(rn.electionTimeoutTimer, randomTimerDuration(minElectionTimeout, maxElectionTimeout))
 
-			aeResponse := func(appendEntriesResponse *AppendEntriesResponse) *Envelope {
-				return &Envelope{
-					OperationType: AppendEntriesResponseOp,
-					Payload:       appendEntriesResponse.Bytes(),
-				}
-			}
-
 			resp := &AppendEntriesResponse{
 				Term:        currentTerm,
 				Success:     false,
@@ -148,7 +141,7 @@ func (rn *RaftNodeImpl) processOneTransistion() {
 			}
 			// request's term is lower than current term, deny request
 			if appendEntriesRequest.Term < currentTerm {
-				rn.network.Send(appendEntriesRequest.LeaderId, aeResponse(resp).Bytes())
+				rn.SendMessage(appendEntriesRequest.LeaderId, resp)
 				return
 			}
 
@@ -159,14 +152,12 @@ func (rn *RaftNodeImpl) processOneTransistion() {
 				if !exists {
 					rn.Log("no such entry at index %d", appendEntriesRequest.PrevLogIdx)
 					resp.Success = false
-					msg := aeResponse(resp)
-					rn.network.Send(appendEntriesRequest.LeaderId, msg.Bytes())
+					rn.SendMessage(appendEntriesRequest.LeaderId, resp)
 					return
 				} else if entry.Term != appendEntriesRequest.PrevLogTerm {
 					rn.Log("term mismatch at index %d, expected %d, got %d", appendEntriesRequest.PrevLogIdx, appendEntriesRequest.PrevLogTerm, entry.Term)
 					resp.Success = false
-					msg := aeResponse(resp)
-					rn.network.Send(appendEntriesRequest.LeaderId, msg.Bytes())
+					rn.SendMessage(appendEntriesRequest.LeaderId, resp)
 					return
 				}
 			}
@@ -205,7 +196,8 @@ func (rn *RaftNodeImpl) processOneTransistion() {
 
 			resp.Success = true
 			resp.MatchIndex = appendEntriesRequest.PrevLogIdx + uint64(len(appendEntriesRequest.Entries))
-			rn.network.Send(appendEntriesRequest.LeaderId, aeResponse(resp).Bytes())
+
+			rn.SendMessage(appendEntriesRequest.LeaderId, resp)
 
 			if rn.commitIndex > rn.storage.GetLastLogIndex() {
 				panic(fmt.Sprintf("commit index %d is greater than last log index %d", rn.commitIndex, rn.storage.GetLastLogIndex()))
@@ -280,16 +272,14 @@ func (rn *RaftNodeImpl) processOneTransistion() {
 				}
 
 				entries := rn.entriesToSendToFollower(appendEntriesResponse.ResponderId)
-				rn.SendMessage(appendEntriesResponse.ResponderId, &AppendEntriesRequest{
+				rn.sendNewAppendEntryRequest(&AppendEntriesRequest{
 					Term:            currentTerm,
 					LeaderId:        rn.id,
 					Entries:         entries,
 					PrevLogIdx:      prevLogIndex,
 					PrevLogTerm:     prevLogEntry.Term,
 					LeaderCommitIdx: rn.commitIndex,
-				})
-				followerState.aeTimestamp = time.Now()
-				resetAndDrainTimer(followerState.timer, aeResponseTimeoutDuration)
+				}, appendEntriesResponse.ResponderId, followerState)
 			}
 
 			// commit index only is incremented if matchIndex has been changed
@@ -373,16 +363,12 @@ func (rn *RaftNodeImpl) processOneTransistion() {
 			}
 
 			// send vote response to candidate
-			resp := VoteResponse{
+			resp := &VoteResponse{
 				Term:        currentTerm,
 				VoteGranted: voteGranted,
 				VoterId:     rn.id,
 			}
-			msg := Envelope{
-				OperationType: VoteResponseOp,
-				Payload:       resp.Bytes(),
-			}
-			rn.network.Send(voteRequest.CandidateId, msg.Bytes())
+			rn.SendMessage(voteRequest.CandidateId, resp)
 		case VoteResponseOp:
 			voteResponse := message.(*VoteResponse)
 
@@ -391,7 +377,7 @@ func (rn *RaftNodeImpl) processOneTransistion() {
 				return
 			}
 
-			currentTerm := rn.storage.GetCurrentTerm()
+			currentTerm = rn.storage.GetCurrentTerm()
 			if voteResponse.Term > currentTerm {
 				rn.Log("received vote response with a higher term, voteResponseTerm: %d", voteResponse.Term)
 				rn.stepdownDueToHigherTerm(voteResponse.Term)
@@ -458,16 +444,14 @@ func (rn *RaftNodeImpl) processOneTransistion() {
 				if !exists {
 					panic(fmt.Sprintf("no log entry at index %d", prevLogIndex))
 				}
-				rn.SendMessage(followerId, &AppendEntriesRequest{
+				rn.sendNewAppendEntryRequest(&AppendEntriesRequest{
 					Term:            currentTerm,
 					LeaderId:        rn.id,
 					Entries:         rn.entriesToSendToFollower(followerId),
 					PrevLogIdx:      prevLogIndex,
 					PrevLogTerm:     prevLogEntry.Term,
 					LeaderCommitIdx: rn.commitIndex,
-				})
-				resetAndDrainTimer(followerState.timer, aeResponseTimeoutDuration)
-				followerState.aeTimestamp = time.Now()
+				}, followerId, followerState)
 			default:
 				// do nothing
 			}
@@ -517,8 +501,7 @@ func (rn *RaftNodeImpl) ascendToLeader() {
 		prevLogTerm = lastLogEntry.Term
 	}
 
-	// send initial empty AppendEntriesRequest to each peer
-	// TODO: replace w/ fn
+	// broadcast initial empty AppendEntriesRequest to peers
 	newLeaderAEReq := &AppendEntriesRequest{
 		Term:            rn.storage.GetCurrentTerm(),
 		LeaderId:        rn.id,
@@ -537,6 +520,12 @@ func (rn *RaftNodeImpl) ascendToLeader() {
 		followerState.aeTimestamp = time.Now()
 		resetAndDrainTimer(followerState.timer, aeResponseTimeoutDuration)
 	}
+}
+
+func (rn *RaftNodeImpl) sendNewAppendEntryRequest(aeReq *AppendEntriesRequest, followerId string, followerState *FollowerState) {
+	rn.SendMessage(followerId, aeReq)
+	followerState.aeTimestamp = time.Now()
+	resetAndDrainTimer(followerState.timer, aeResponseTimeoutDuration)
 }
 
 func (rn *RaftNodeImpl) convertToCandidate() {
@@ -591,7 +580,7 @@ func (rn *RaftNodeImpl) stepdownDueToHigherTerm(term uint64) {
 	// convert to follower
 	rn.state = Follower
 	// reset election timer so we can give candidate time to resolve election
-	// FIX: init election timer
+	resetAndDrainTimer(rn.electionTimeoutTimer, randomTimerDuration(minElectionTimeout, maxElectionTimeout))
 }
 
 func (rn *RaftNodeImpl) requestVotes(term uint64, candidateId string) {
