@@ -4,7 +4,12 @@ import (
 	"fmt"
 	"reflect"
 	"testing"
+	"time"
 	"toy-raft/network"
+)
+
+const (
+	A_LONG_TIME = 100 * time.Hour
 )
 
 type TestNetwork struct {
@@ -107,6 +112,8 @@ func TestRaftStepDownDueToHigherTerm(t *testing.T) {
 					id:      true,
 					otherId: true,
 				},
+				electionTimeoutTimer:     time.NewTimer(A_LONG_TIME),
+				voteResponseTimeoutTimer: time.NewTimer(A_LONG_TIME),
 			}
 
 			switch c.initialState {
@@ -182,12 +189,14 @@ func TestConvertToCandidate(t *testing.T) {
 
 	id := "a"
 	raftNode := &RaftNodeImpl{
-		id:              id,
-		inboundMessages: make(chan []byte, 1000),
-		state:           Follower, // could be candidate
-		storage:         NewInMemoryStorage(),
-		voteMap:         nil,
-		network:         dummyNetwork,
+		id:                       id,
+		inboundMessages:          make(chan []byte, 1000),
+		state:                    Follower, // could be candidate
+		storage:                  NewInMemoryStorage(),
+		voteMap:                  nil,
+		network:                  dummyNetwork,
+		electionTimeoutTimer:     time.NewTimer(A_LONG_TIME),
+		voteResponseTimeoutTimer: time.NewTimer(A_LONG_TIME),
 	}
 	previousTerm := raftNode.storage.GetCurrentTerm()
 
@@ -221,10 +230,10 @@ func TestAscendToLeadership(t *testing.T) {
 
 	id := "a"
 	raftNode := &RaftNodeImpl{
-		id:                      id,
-		inboundMessages:         make(chan []byte, 1000),
-		state:                   Follower, // could be candidate
-		storage:                 NewInMemoryStorage(),
+		id:                id,
+		inboundMessages:   make(chan []byte, 1000),
+		state:             Follower, // could be candidate
+		storage:           NewInMemoryStorage(),
 		voteMap:           nil,
 		followersStateMap: nil,
 		peers: map[string]bool{
@@ -235,7 +244,9 @@ func TestAscendToLeadership(t *testing.T) {
 			"d": true,
 			"e": true,
 		},
-		network: dummyNetwork,
+		network:                  dummyNetwork,
+		electionTimeoutTimer:     time.NewTimer(A_LONG_TIME),
+		voteResponseTimeoutTimer: time.NewTimer(A_LONG_TIME),
 	}
 	currentTerm := raftNode.storage.GetCurrentTerm()
 
@@ -378,7 +389,12 @@ func TestAscendToLeadership(t *testing.T) {
 			matchIndex: 0,
 		},
 	}
-	assertDeepEqual(t, raftNode.followersStateMap, expectedFollowersStateMap)
+	// assert equal for only nextIndex and matchIndex
+	for k, v := range raftNode.followersStateMap {
+		expectedFollowerState := expectedFollowersStateMap[k]
+		assertEqual(t, v.nextIndex, expectedFollowerState.nextIndex)
+		assertEqual(t, v.matchIndex, expectedFollowerState.matchIndex)
+	}
 
 	// check that it broadcasted AppendEntriesRequest to the network
 	expectedAppendEntriesRequest := &AppendEntriesRequest{
@@ -413,17 +429,19 @@ func TestFollowerHandleAppendEntries(t *testing.T) {
 
 	createRaftNode := func(id string, term uint64, commitIdx uint64, state RaftState) *RaftNodeImpl {
 		rn := &RaftNodeImpl{
-			id:                      id,
-			stateMachine:            nil,
-			quitCh:                  make(chan bool),
-			inboundMessages:         make(chan []byte, 1000),
-			network:                 dummyNetwork,
-			state:                   state,
-			storage:                 NewInMemoryStorage(),
-			peers:                   map[string]bool{id: true, leaderId: true, "c": true, "d": true, "e": true},
-			voteMap:                 nil,
-			commitIndex:             commitIdx,
-			lastApplied:             0,
+			id:                       id,
+			stateMachine:             nil,
+			quitCh:                   make(chan bool),
+			inboundMessages:          make(chan []byte, 1000),
+			network:                  dummyNetwork,
+			state:                    state,
+			storage:                  NewInMemoryStorage(),
+			peers:                    map[string]bool{id: true, leaderId: true, "c": true, "d": true, "e": true},
+			voteMap:                  nil,
+			commitIndex:              commitIdx,
+			lastApplied:              0,
+			electionTimeoutTimer:     time.NewTimer(A_LONG_TIME),
+			voteResponseTimeoutTimer: time.NewTimer(A_LONG_TIME),
 		}
 		if term > 0 {
 			rn.storage.SetTerm(term)
@@ -725,18 +743,20 @@ func TestHandleVoteRequest(t *testing.T) {
 
 	createRaftNode := func(id string, term uint64, state RaftState, initLog []*Entry) *RaftNodeImpl {
 		rn := &RaftNodeImpl{
-			id:                      id,
-			stateMachine:            nil,
-			quitCh:                  make(chan bool),
-			inboundMessages:         make(chan []byte, 1000),
-			network:                 dummyNetwork,
-			state:                   state,
-			storage:                 NewInMemoryStorage(),
-			peers:                   map[string]bool{id: true, candidateId: true, "c": true, "d": true, "e": true},
-			voteMap:                 nil,
-			followersStateMap:       nil,
-			commitIndex:             0,
-			lastApplied:             0,
+			id:                       id,
+			stateMachine:             nil,
+			quitCh:                   make(chan bool),
+			inboundMessages:          make(chan []byte, 1000),
+			network:                  dummyNetwork,
+			state:                    state,
+			storage:                  NewInMemoryStorage(),
+			peers:                    map[string]bool{id: true, candidateId: true, "c": true, "d": true, "e": true},
+			voteMap:                  nil,
+			followersStateMap:        nil,
+			commitIndex:              0,
+			lastApplied:              0,
+			electionTimeoutTimer:     time.NewTimer(A_LONG_TIME),
+			voteResponseTimeoutTimer: time.NewTimer(A_LONG_TIME),
 		}
 		if term > 0 {
 			rn.storage.SetTerm(term)
@@ -937,27 +957,31 @@ func TestHandleAppendEntriesResponse(t *testing.T) {
 
 	createRaftNode := func(id string, term uint64, state RaftState, initLog []*Entry) *RaftNodeImpl {
 		rn := &RaftNodeImpl{
-			id:                      id,
-			stateMachine:            nil,
-			quitCh:                  make(chan bool),
-			inboundMessages:         make(chan []byte, 1000),
-			network:                 dummyNetwork,
-			state:                   state,
-			storage:                 NewInMemoryStorage(),
-			peers:                   map[string]bool{id: true, otherPeerId: true},
-			voteMap:                 nil,
+			id:              id,
+			stateMachine:    nil,
+			quitCh:          make(chan bool),
+			inboundMessages: make(chan []byte, 1000),
+			network:         dummyNetwork,
+			state:           state,
+			storage:         NewInMemoryStorage(),
+			peers:           map[string]bool{id: true, otherPeerId: true},
+			voteMap:         nil,
 			followersStateMap: map[string]*FollowerState{
 				id: {
 					nextIndex:  1,
 					matchIndex: 0,
+					timer:      time.NewTimer(A_LONG_TIME),
 				},
 				otherPeerId: {
 					nextIndex:  1,
 					matchIndex: 0,
+					timer:      time.NewTimer(A_LONG_TIME),
 				},
 			},
-			commitIndex: 0,
-			lastApplied: 0,
+			commitIndex:              0,
+			lastApplied:              0,
+			electionTimeoutTimer:     time.NewTimer(A_LONG_TIME),
+			voteResponseTimeoutTimer: time.NewTimer(A_LONG_TIME),
 		}
 		if term > 0 {
 			rn.storage.SetTerm(term)
@@ -1219,18 +1243,20 @@ func TestUpdateLeaderCommitIndex(t *testing.T) {
 
 	createLeader := func(id string, term uint64, commitIndex uint64, initLog []*Entry, initFollowerMap map[string]*FollowerState) *RaftNodeImpl {
 		rn := &RaftNodeImpl{
-			id:                      id,
-			stateMachine:            nil,
-			quitCh:                  make(chan bool),
-			inboundMessages:         make(chan []byte, 1000),
-			network:                 dummyNetwork,
-			state:                   Leader,
-			storage:                 NewInMemoryStorage(),
-			peers:                   map[string]bool{id: true, responderPeerId: true, otherPeerId: true},
-			voteMap:                 nil,
-			followersStateMap:       initFollowerMap,
-			commitIndex:             commitIndex,
-			lastApplied:             0,
+			id:                       id,
+			stateMachine:             nil,
+			quitCh:                   make(chan bool),
+			inboundMessages:          make(chan []byte, 1000),
+			network:                  dummyNetwork,
+			state:                    Leader,
+			storage:                  NewInMemoryStorage(),
+			peers:                    map[string]bool{id: true, responderPeerId: true, otherPeerId: true},
+			voteMap:                  nil,
+			followersStateMap:        initFollowerMap,
+			commitIndex:              commitIndex,
+			lastApplied:              0,
+			electionTimeoutTimer:     time.NewTimer(A_LONG_TIME),
+			voteResponseTimeoutTimer: time.NewTimer(A_LONG_TIME),
 		}
 		if term > 0 {
 			rn.storage.SetTerm(term)
@@ -1267,14 +1293,17 @@ func TestUpdateLeaderCommitIndex(t *testing.T) {
 				leaderPeerId: {
 					nextIndex:  1,
 					matchIndex: 0,
+					timer:      time.NewTimer(A_LONG_TIME),
 				},
 				responderPeerId: {
 					nextIndex:  1,
 					matchIndex: 0,
+					timer:      time.NewTimer(A_LONG_TIME),
 				},
 				otherPeerId: {
 					nextIndex:  1,
 					matchIndex: 0,
+					timer:      time.NewTimer(A_LONG_TIME),
 				},
 			},
 			responseMatchIndex:        0,
@@ -1293,14 +1322,17 @@ func TestUpdateLeaderCommitIndex(t *testing.T) {
 				leaderPeerId: {
 					nextIndex:  5,
 					matchIndex: 4,
+					timer:      time.NewTimer(A_LONG_TIME),
 				},
 				responderPeerId: {
 					nextIndex:  1,
 					matchIndex: 0,
+					timer:      time.NewTimer(A_LONG_TIME),
 				},
 				otherPeerId: {
 					nextIndex:  1,
 					matchIndex: 0,
+					timer:      time.NewTimer(A_LONG_TIME),
 				},
 			},
 			responseMatchIndex:        4,
@@ -1319,14 +1351,17 @@ func TestUpdateLeaderCommitIndex(t *testing.T) {
 				leaderPeerId: {
 					nextIndex:  1,
 					matchIndex: 0,
+					timer:      time.NewTimer(A_LONG_TIME),
 				},
 				responderPeerId: {
 					nextIndex:  1,
 					matchIndex: 0,
+					timer:      time.NewTimer(A_LONG_TIME),
 				},
 				otherPeerId: {
 					nextIndex:  1,
 					matchIndex: 0,
+					timer:      time.NewTimer(A_LONG_TIME),
 				},
 			},
 			responseMatchIndex:        4,
@@ -1345,14 +1380,17 @@ func TestUpdateLeaderCommitIndex(t *testing.T) {
 				leaderPeerId: {
 					nextIndex:  5,
 					matchIndex: 4,
+					timer:      time.NewTimer(A_LONG_TIME),
 				},
 				responderPeerId: {
 					nextIndex:  4,
 					matchIndex: 3,
+					timer:      time.NewTimer(A_LONG_TIME),
 				},
 				otherPeerId: {
 					nextIndex:  4,
 					matchIndex: 3,
+					timer:      time.NewTimer(A_LONG_TIME),
 				},
 			},
 			responseMatchIndex:        4,
