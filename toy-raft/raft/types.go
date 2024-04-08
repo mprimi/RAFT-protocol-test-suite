@@ -219,9 +219,8 @@ type FollowerState struct {
 	nextIndex uint64
 	// index of highest log entry known to be replicated on server
 	matchIndex uint64
-	// timer for rpc retrys and heartbeats
-	timer *time.Timer
-	// timestamp of AppendEntries request that was last sent  to the follower
+	// timestamp of AppendEntries request that was last sent to the follower
 	aeTimestamp time.Time
+	// waiting for response
+	waitingForAEResponse bool
 }
-

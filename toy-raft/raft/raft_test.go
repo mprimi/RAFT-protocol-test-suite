@@ -34,6 +34,7 @@ func (net *TestNetwork) RegisterNode(id string, networkDevice network.NetworkDev
 }
 
 func assertNoErr(t *testing.T, err error) {
+	t.Helper()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -42,7 +43,7 @@ func assertNoErr(t *testing.T, err error) {
 func assertEqual[T comparable](t *testing.T, actual T, expected T) {
 	t.Helper()
 	if actual != expected {
-		t.Fatalf("expected %+v, actual %+v", expected, actual)
+		t.Fatalf("expected: %+v, actual: %+v", expected, actual)
 	}
 }
 
@@ -112,8 +113,9 @@ func TestRaftStepDownDueToHigherTerm(t *testing.T) {
 					id:      true,
 					otherId: true,
 				},
-				electionTimeoutTimer:     time.NewTimer(A_LONG_TIME),
-				voteResponseTimeoutTimer: time.NewTimer(A_LONG_TIME),
+				electionTimeoutTimer:         time.NewTimer(A_LONG_TIME),
+				voteResponseTimeoutTimer:     time.NewTimer(A_LONG_TIME),
+				followersAppendEntriesTicker: time.NewTicker(A_LONG_TIME),
 			}
 
 			switch c.initialState {
@@ -189,14 +191,15 @@ func TestConvertToCandidate(t *testing.T) {
 
 	id := "a"
 	raftNode := &RaftNodeImpl{
-		id:                       id,
-		inboundMessages:          make(chan []byte, 1000),
-		state:                    Follower, // could be candidate
-		storage:                  NewInMemoryStorage(),
-		voteMap:                  nil,
-		network:                  dummyNetwork,
-		electionTimeoutTimer:     time.NewTimer(A_LONG_TIME),
-		voteResponseTimeoutTimer: time.NewTimer(A_LONG_TIME),
+		id:                           id,
+		inboundMessages:              make(chan []byte, 1000),
+		state:                        Follower, // could be candidate
+		storage:                      NewInMemoryStorage(),
+		voteMap:                      nil,
+		network:                      dummyNetwork,
+		electionTimeoutTimer:         time.NewTimer(A_LONG_TIME),
+		voteResponseTimeoutTimer:     time.NewTimer(A_LONG_TIME),
+		followersAppendEntriesTicker: time.NewTicker(A_LONG_TIME),
 	}
 	previousTerm := raftNode.storage.GetCurrentTerm()
 
@@ -244,9 +247,10 @@ func TestAscendToLeadership(t *testing.T) {
 			"d": true,
 			"e": true,
 		},
-		network:                  dummyNetwork,
-		electionTimeoutTimer:     time.NewTimer(A_LONG_TIME),
-		voteResponseTimeoutTimer: time.NewTimer(A_LONG_TIME),
+		network:                      dummyNetwork,
+		electionTimeoutTimer:         time.NewTimer(A_LONG_TIME),
+		voteResponseTimeoutTimer:     time.NewTimer(A_LONG_TIME),
+		followersAppendEntriesTicker: time.NewTicker(A_LONG_TIME),
 	}
 	currentTerm := raftNode.storage.GetCurrentTerm()
 
@@ -429,19 +433,20 @@ func TestFollowerHandleAppendEntries(t *testing.T) {
 
 	createRaftNode := func(id string, term uint64, commitIdx uint64, state RaftState) *RaftNodeImpl {
 		rn := &RaftNodeImpl{
-			id:                       id,
-			stateMachine:             nil,
-			quitCh:                   make(chan bool),
-			inboundMessages:          make(chan []byte, 1000),
-			network:                  dummyNetwork,
-			state:                    state,
-			storage:                  NewInMemoryStorage(),
-			peers:                    map[string]bool{id: true, leaderId: true, "c": true, "d": true, "e": true},
-			voteMap:                  nil,
-			commitIndex:              commitIdx,
-			lastApplied:              0,
-			electionTimeoutTimer:     time.NewTimer(A_LONG_TIME),
-			voteResponseTimeoutTimer: time.NewTimer(A_LONG_TIME),
+			id:                           id,
+			stateMachine:                 nil,
+			quitCh:                       make(chan bool),
+			inboundMessages:              make(chan []byte, 1000),
+			network:                      dummyNetwork,
+			state:                        state,
+			storage:                      NewInMemoryStorage(),
+			peers:                        map[string]bool{id: true, leaderId: true, "c": true, "d": true, "e": true},
+			voteMap:                      nil,
+			commitIndex:                  commitIdx,
+			lastApplied:                  0,
+			electionTimeoutTimer:         time.NewTimer(A_LONG_TIME),
+			voteResponseTimeoutTimer:     time.NewTimer(A_LONG_TIME),
+			followersAppendEntriesTicker: time.NewTicker(A_LONG_TIME),
 		}
 		if term > 0 {
 			rn.storage.SetTerm(term)
@@ -743,20 +748,21 @@ func TestHandleVoteRequest(t *testing.T) {
 
 	createRaftNode := func(id string, term uint64, state RaftState, initLog []*Entry) *RaftNodeImpl {
 		rn := &RaftNodeImpl{
-			id:                       id,
-			stateMachine:             nil,
-			quitCh:                   make(chan bool),
-			inboundMessages:          make(chan []byte, 1000),
-			network:                  dummyNetwork,
-			state:                    state,
-			storage:                  NewInMemoryStorage(),
-			peers:                    map[string]bool{id: true, candidateId: true, "c": true, "d": true, "e": true},
-			voteMap:                  nil,
-			followersStateMap:        nil,
-			commitIndex:              0,
-			lastApplied:              0,
-			electionTimeoutTimer:     time.NewTimer(A_LONG_TIME),
-			voteResponseTimeoutTimer: time.NewTimer(A_LONG_TIME),
+			id:                           id,
+			stateMachine:                 nil,
+			quitCh:                       make(chan bool),
+			inboundMessages:              make(chan []byte, 1000),
+			network:                      dummyNetwork,
+			state:                        state,
+			storage:                      NewInMemoryStorage(),
+			peers:                        map[string]bool{id: true, candidateId: true, "c": true, "d": true, "e": true},
+			voteMap:                      nil,
+			followersStateMap:            nil,
+			commitIndex:                  0,
+			lastApplied:                  0,
+			electionTimeoutTimer:         time.NewTimer(A_LONG_TIME),
+			voteResponseTimeoutTimer:     time.NewTimer(A_LONG_TIME),
+			followersAppendEntriesTicker: time.NewTicker(A_LONG_TIME),
 		}
 		if term > 0 {
 			rn.storage.SetTerm(term)
@@ -970,18 +976,17 @@ func TestHandleAppendEntriesResponse(t *testing.T) {
 				id: {
 					nextIndex:  1,
 					matchIndex: 0,
-					timer:      time.NewTimer(A_LONG_TIME),
 				},
 				otherPeerId: {
 					nextIndex:  1,
 					matchIndex: 0,
-					timer:      time.NewTimer(A_LONG_TIME),
 				},
 			},
-			commitIndex:              0,
-			lastApplied:              0,
-			electionTimeoutTimer:     time.NewTimer(A_LONG_TIME),
-			voteResponseTimeoutTimer: time.NewTimer(A_LONG_TIME),
+			commitIndex:                  0,
+			lastApplied:                  0,
+			electionTimeoutTimer:         time.NewTimer(A_LONG_TIME),
+			voteResponseTimeoutTimer:     time.NewTimer(A_LONG_TIME),
+			followersAppendEntriesTicker: time.NewTicker(A_LONG_TIME),
 		}
 		if term > 0 {
 			rn.storage.SetTerm(term)
@@ -1243,20 +1248,21 @@ func TestUpdateLeaderCommitIndex(t *testing.T) {
 
 	createLeader := func(id string, term uint64, commitIndex uint64, initLog []*Entry, initFollowerMap map[string]*FollowerState) *RaftNodeImpl {
 		rn := &RaftNodeImpl{
-			id:                       id,
-			stateMachine:             nil,
-			quitCh:                   make(chan bool),
-			inboundMessages:          make(chan []byte, 1000),
-			network:                  dummyNetwork,
-			state:                    Leader,
-			storage:                  NewInMemoryStorage(),
-			peers:                    map[string]bool{id: true, responderPeerId: true, otherPeerId: true},
-			voteMap:                  nil,
-			followersStateMap:        initFollowerMap,
-			commitIndex:              commitIndex,
-			lastApplied:              0,
-			electionTimeoutTimer:     time.NewTimer(A_LONG_TIME),
-			voteResponseTimeoutTimer: time.NewTimer(A_LONG_TIME),
+			id:                           id,
+			stateMachine:                 nil,
+			quitCh:                       make(chan bool),
+			inboundMessages:              make(chan []byte, 1000),
+			network:                      dummyNetwork,
+			state:                        Leader,
+			storage:                      NewInMemoryStorage(),
+			peers:                        map[string]bool{id: true, responderPeerId: true, otherPeerId: true},
+			voteMap:                      nil,
+			followersStateMap:            initFollowerMap,
+			commitIndex:                  commitIndex,
+			lastApplied:                  0,
+			electionTimeoutTimer:         time.NewTimer(A_LONG_TIME),
+			voteResponseTimeoutTimer:     time.NewTimer(A_LONG_TIME),
+			followersAppendEntriesTicker: time.NewTicker(A_LONG_TIME),
 		}
 		if term > 0 {
 			rn.storage.SetTerm(term)
@@ -1293,17 +1299,14 @@ func TestUpdateLeaderCommitIndex(t *testing.T) {
 				leaderPeerId: {
 					nextIndex:  1,
 					matchIndex: 0,
-					timer:      time.NewTimer(A_LONG_TIME),
 				},
 				responderPeerId: {
 					nextIndex:  1,
 					matchIndex: 0,
-					timer:      time.NewTimer(A_LONG_TIME),
 				},
 				otherPeerId: {
 					nextIndex:  1,
 					matchIndex: 0,
-					timer:      time.NewTimer(A_LONG_TIME),
 				},
 			},
 			responseMatchIndex:        0,
@@ -1322,17 +1325,14 @@ func TestUpdateLeaderCommitIndex(t *testing.T) {
 				leaderPeerId: {
 					nextIndex:  5,
 					matchIndex: 4,
-					timer:      time.NewTimer(A_LONG_TIME),
 				},
 				responderPeerId: {
 					nextIndex:  1,
 					matchIndex: 0,
-					timer:      time.NewTimer(A_LONG_TIME),
 				},
 				otherPeerId: {
 					nextIndex:  1,
 					matchIndex: 0,
-					timer:      time.NewTimer(A_LONG_TIME),
 				},
 			},
 			responseMatchIndex:        4,
@@ -1351,17 +1351,14 @@ func TestUpdateLeaderCommitIndex(t *testing.T) {
 				leaderPeerId: {
 					nextIndex:  1,
 					matchIndex: 0,
-					timer:      time.NewTimer(A_LONG_TIME),
 				},
 				responderPeerId: {
 					nextIndex:  1,
 					matchIndex: 0,
-					timer:      time.NewTimer(A_LONG_TIME),
 				},
 				otherPeerId: {
 					nextIndex:  1,
 					matchIndex: 0,
-					timer:      time.NewTimer(A_LONG_TIME),
 				},
 			},
 			responseMatchIndex:        4,
@@ -1380,17 +1377,14 @@ func TestUpdateLeaderCommitIndex(t *testing.T) {
 				leaderPeerId: {
 					nextIndex:  5,
 					matchIndex: 4,
-					timer:      time.NewTimer(A_LONG_TIME),
 				},
 				responderPeerId: {
 					nextIndex:  4,
 					matchIndex: 3,
-					timer:      time.NewTimer(A_LONG_TIME),
 				},
 				otherPeerId: {
 					nextIndex:  4,
 					matchIndex: 3,
-					timer:      time.NewTimer(A_LONG_TIME),
 				},
 			},
 			responseMatchIndex:        4,
@@ -1421,5 +1415,294 @@ func TestUpdateLeaderCommitIndex(t *testing.T) {
 
 		})
 	}
+}
+
+func TestFollowerElectionTimer(t *testing.T) {
+
+	dummyNetwork := &TestNetwork{}
+
+	id := "FOLLOWER_NODE"
+	peer := "PEER_NODE"
+	electionTimerDuration := 100 * time.Millisecond
+	node := &RaftNodeImpl{
+		id:                           id,
+		stateMachine:                 nil,
+		quitCh:                       make(chan bool),
+		inboundMessages:              make(chan []byte, 1000),
+		network:                      dummyNetwork,
+		state:                        Follower,
+		storage:                      NewInMemoryStorage(),
+		peers:                        map[string]bool{id: true, peer: true},
+		voteMap:                      nil,
+		commitIndex:                  0,
+		lastApplied:                  0,
+		electionTimeoutTimer:         time.NewTimer(electionTimerDuration),
+		voteResponseTimeoutTimer:     time.NewTimer(A_LONG_TIME),
+		followersAppendEntriesTicker: time.NewTicker(A_LONG_TIME),
+	}
+	node.processOneTransistionInternal(electionTimerDuration / 2)
+	// verify it didn't do anything
+	assertEqual(t, node.state, Follower)
+	assertEqual(t, string(dummyNetwork.lastMessageBroadcasted), "")
+	time.Sleep(electionTimerDuration)
+	node.processOneTransistion()
+	// verify that it started candidacy
+	assertEqual(t, node.state, Candidate)
+	opType, _, err := parseMessage(dummyNetwork.lastMessageBroadcasted)
+	assertNil(t, err)
+	assertEqual(t, opType, VoteRequestOp)
+
+	// send a message from a peer w/ a higher term so we can stepdown
+	peerTerm := node.storage.GetCurrentTerm() + 1
+	stepDownVoteRequest := &VoteRequest{
+		Term:         peerTerm,
+		CandidateId:  peer,
+		LastLogIndex: 1,
+		LastLogTerm:  0,
+	}
+	msg := Envelope{
+		OperationType: VoteRequestOp,
+		Payload:       stepDownVoteRequest.Bytes(),
+	}
+	node.inboundMessages <- msg.Bytes()
+
+	node.processOneTransistion()
+	// stepped down
+	assertEqual(t, node.state, Follower)
+	// term is updated
+	assertEqual(t, node.storage.GetCurrentTerm(), peerTerm)
+
+	// election timeout, back to candidate
+	time.Sleep(maxElectionTimeout)
+	node.processOneTransistion()
+	// verify that it started candidacy
+	assertEqual(t, node.state, Candidate)
+	opType, _, err = parseMessage(dummyNetwork.lastMessageBroadcasted)
+	assertNil(t, err)
+	assertEqual(t, opType, VoteRequestOp)
+
+}
+
+func TestSendAppendEntriesTicker(t *testing.T) {
+
+	dummyNetwork := &TestNetwork{}
+
+	term := uint64(1)
+	id := "NODE"
+	peer1 := "PEER_1"
+	peer2 := "PEER_2"
+	electionTimerDuration := 100 * time.Millisecond
+	node := &RaftNodeImpl{
+		id:                           id,
+		stateMachine:                 nil,
+		quitCh:                       make(chan bool),
+		inboundMessages:              make(chan []byte, 1000),
+		network:                      dummyNetwork,
+		state:                        Candidate,
+		storage:                      NewInMemoryStorage(),
+		peers:                        map[string]bool{id: true, peer1: true, peer2: true},
+		voteMap:                      make(map[string]bool, 3),
+		commitIndex:                  0,
+		lastApplied:                  0,
+		electionTimeoutTimer:         time.NewTimer(electionTimerDuration),
+		voteResponseTimeoutTimer:     time.NewTimer(A_LONG_TIME),
+		followersAppendEntriesTicker: time.NewTicker(100 * time.Millisecond),
+	}
+	node.storage.SetTerm(term)
+
+	//candidate -> leader
+	//broadcast ae
+	node.ascendToLeader()
+	followerToAeTimestamp := make(map[string]time.Time)
+	for follower, followerState := range node.followersStateMap {
+		followerToAeTimestamp[follower] = followerState.aeTimestamp
+		//..check waitingForAEResponse for all followers is true
+		assertEqual(t, followerState.waitingForAEResponse, true)
+	}
+
+	//call processOneTransition#nonBlocking
+	node.processOneTransistionInternal(10 * time.Millisecond)
+	for follower, followerState := range node.followersStateMap {
+		//..check waitingForAEResponse for all followers is true
+		assertEqual(t, followerState.waitingForAEResponse, true)
+		//..check aeTimestamp for all followers didn't change
+		assertEqual(t, followerState.aeTimestamp, followerToAeTimestamp[follower])
+	}
+
+	// leader responds to itself
+	{
+		aeResponse := &AppendEntriesResponse{
+			Term:        term,
+			Success:     true,
+			ResponderId: id,
+			MatchIndex:  0,
+		}
+		msg := Envelope{
+			OperationType: AppendEntriesResponseOp,
+			Payload:       aeResponse.Bytes(),
+		}
+		node.inboundMessages <- msg.Bytes()
+		node.processOneTransistion()
+	}
+
+	// one of the peers responds
+	{
+		aeResponse := &AppendEntriesResponse{
+			Term:        term,
+			Success:     true,
+			ResponderId: peer1,
+			MatchIndex:  0,
+		}
+		msg := Envelope{
+			OperationType: AppendEntriesResponseOp,
+			Payload:       aeResponse.Bytes(),
+		}
+		node.inboundMessages <- msg.Bytes()
+		node.processOneTransistion()
+	}
+
+	//..check 2/3 waitingForAEResponse is false, other node is true
+	assertEqual(t, node.followersStateMap[id].waitingForAEResponse, false)
+	assertEqual(t, node.followersStateMap[peer1].waitingForAEResponse, false)
+	// peer has not responded yet
+	assertEqual(t, node.followersStateMap[peer2].waitingForAEResponse, true)
+
+	//wait for AE timeout
+	time.Sleep(aeResponseTimeoutDuration)
+	node.processOneTransistion()
+
+	//.. check that leader resends message to 1/3
+	for follower, followerState := range node.followersStateMap {
+		shouldRetry := time.Since(node.followersStateMap[follower].aeTimestamp) > aeResponseTimeoutDuration
+		t.Logf("follower: %s, shouldRetry: %t, aeTimestamp: %s", follower, shouldRetry, followerState.aeTimestamp)
+	}
+	assertEqual(t, dummyNetwork.lastRecipient, peer2)
+	if dummyNetwork.lastMessageSent == nil {
+		t.Fatalf("expected message to be resent to %s", peer2)
+	}
+	opType, _, err := parseMessage(dummyNetwork.lastMessageSent)
+	assertNoErr(t, err)
+	assertEqual(t, opType, AppendEntriesRequestOp)
+
+	//wait -> send heartbeat
+	time.Sleep(heartbeatInterval)
+	node.processOneTransistion()
+
+	//..check heartbeat sent to 2/3
+	opType, _, err = parseMessage(dummyNetwork.lastMessageSent)
+	assertNil(t, err)
+	assertEqual(t, opType, AppendEntriesRequestOp)
+	for _, peer := range []string{id, peer1} {
+		//..check 2/3 waitingForAEResponse is true
+		assertEqual(t, node.followersStateMap[peer].waitingForAEResponse, true)
+	}
+
+}
+
+func TestCandidateReceiveVoteResponseTimeoutTimer(t *testing.T) {
+	dummyNetwork := &TestNetwork{}
+
+	initTerm := uint64(1)
+	id := "NODE"
+	peer1 := "PEER_1"
+	peer2 := "PEER_2"
+	electionTimerDuration := 100 * time.Millisecond
+	node := &RaftNodeImpl{
+		id:                           id,
+		stateMachine:                 nil,
+		quitCh:                       make(chan bool),
+		inboundMessages:              make(chan []byte, 1000),
+		network:                      dummyNetwork,
+		state:                        Follower,
+		storage:                      NewInMemoryStorage(),
+		peers:                        map[string]bool{id: true, peer1: true, peer2: true},
+		commitIndex:                  0,
+		lastApplied:                  0,
+		electionTimeoutTimer:         time.NewTimer(electionTimerDuration),
+		voteResponseTimeoutTimer:     time.NewTimer(A_LONG_TIME),
+		followersAppendEntriesTicker: time.NewTicker(A_LONG_TIME),
+	}
+	node.storage.SetTerm(initTerm)
+
+	//OG_follower -> candidate
+	time.Sleep(electionTimerDuration)
+	node.processOneTransistion()
+	//..check state is Candidate
+	assertEqual(t, node.state, Candidate)
+	//..check term is increased by 1
+	assertEqual(t, node.storage.GetCurrentTerm(), initTerm+1)
+
+	//candidate broadcasts vote requests
+	//..check lastMessageBroadcasted is VoteRequest
+	opType, _, err := parseMessage(dummyNetwork.lastMessageBroadcasted)
+	assertNoErr(t, err)
+	assertEqual(t, opType, VoteRequestOp)
+	//receives votes: yes, no, no_answer
+	{
+		voteResponse := &VoteResponse{
+			Term:        initTerm + 1,
+			VoterId:     id,
+			VoteGranted: true,
+		}
+		msg := Envelope{
+			OperationType: VoteResponseOp,
+			Payload:       voteResponse.Bytes(),
+		}
+		node.inboundMessages <- msg.Bytes()
+		node.processOneTransistion()
+	}
+	{
+		voteResponse := &VoteResponse{
+			Term:        initTerm + 1,
+			VoterId:     peer1,
+			VoteGranted: false,
+		}
+		msg := Envelope{
+			OperationType: VoteResponseOp,
+			Payload:       voteResponse.Bytes(),
+		}
+		node.inboundMessages <- msg.Bytes()
+		node.processOneTransistion()
+	}
+	//..check state is still Candidate
+	assertEqual(t, node.state, Candidate)
+
+	//wait for timer to expire
+	time.Sleep(voteResponseTimeoutDuration)
+	node.processOneTransistion()
+	//candidate does relection
+	//..check state is Candidate
+	assertEqual(t, node.state, Candidate)
+	//..check term is OG_follower.Term + 2
+	assertEqual(t, node.storage.GetCurrentTerm(), initTerm+2)
+	//receives votes: yes, yes, whatever
+	{
+		voteResponse := &VoteResponse{
+			Term:        initTerm + 2,
+			VoterId:     id,
+			VoteGranted: true,
+		}
+		msg := Envelope{
+			OperationType: VoteResponseOp,
+			Payload:       voteResponse.Bytes(),
+		}
+		node.inboundMessages <- msg.Bytes()
+		node.processOneTransistion()
+	}
+	{
+		voteResponse := &VoteResponse{
+			Term:        initTerm + 2,
+			VoterId:     peer1,
+			VoteGranted: true,
+		}
+		msg := Envelope{
+			OperationType: VoteResponseOp,
+			Payload:       voteResponse.Bytes(),
+		}
+		node.inboundMessages <- msg.Bytes()
+		node.processOneTransistion()
+	}
+	//..check state leader
+	assertEqual(t, node.state, Leader)
 
 }
