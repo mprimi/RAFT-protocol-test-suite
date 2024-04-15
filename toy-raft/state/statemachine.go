@@ -1,7 +1,11 @@
 package state
 
 type StateMachine interface {
-	GetCurrentValue() ([]byte, uint64)
+
+	Size() int
+
+	// return the last n blocks and the index of the first block
+	GetTailBlocks(n int) (blocks [][]byte, offset int)
 
 	// META
 	GetId() string

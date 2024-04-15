@@ -73,7 +73,6 @@ func (store *InMemoryStorage) GetLogEntry(logIdx uint64) (*Entry, bool) {
 	return store.log[arrIdx], true
 }
 
-// HACK: only for tests
 func (store *InMemoryStorage) TestGetLogEntries() []*Entry {
 	return store.log
 }

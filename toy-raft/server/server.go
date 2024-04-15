@@ -14,30 +14,39 @@ type RaftNode interface {
 }
 
 type ServerImpl struct {
-	id string
+	Id string
 	// raft node
-	raftNode RaftNode
+	RaftNode RaftNode
 	// state machine
-	stateMachine state.StateMachine
+	StateMachine state.StateMachine
 }
 
-func (s *ServerImpl) Propose(blob []byte) {
-	s.raftNode.Propose(blob)
+func NewServer(id string, raftNode RaftNode, stateMachine state.StateMachine) *ServerImpl {
+	return &ServerImpl{
+		Id:           id,
+		RaftNode:     raftNode,
+		StateMachine: stateMachine,
+	}
 }
 
-func (s *ServerImpl) Get() ([]byte, uint64) {
-	return s.stateMachine.GetCurrentValue()
+func (s *ServerImpl) Propose(blob []byte) error {
+	return s.RaftNode.Propose(blob)
+}
+
+func (s *ServerImpl) Get() ([]byte, int) {
+	latestBlock, offset := s.StateMachine.GetBlocks(1)
+	return latestBlock[0], offset
 }
 
 func (s *ServerImpl) Start() {
-	fmt.Printf("Starting server %s\n", s.id)
-	s.raftNode.Start()
+	fmt.Printf("Starting server %s\n", s.Id)
+	s.RaftNode.Start()
 }
 
 func (s *ServerImpl) Stop() {
-	s.raftNode.Stop()
+	s.RaftNode.Stop()
 }
 
 func (s *ServerImpl) Receive(msg []byte) {
-	s.raftNode.Receive(msg)
+	s.RaftNode.Receive(msg)
 }

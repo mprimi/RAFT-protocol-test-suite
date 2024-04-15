@@ -2,6 +2,7 @@ package raft
 
 import (
 	"fmt"
+	"log"
 	"reflect"
 	"testing"
 	"time"
@@ -12,6 +13,29 @@ const (
 	A_LONG_TIME = 100 * time.Hour
 )
 
+type MockStateMachine struct {
+	blocks [][]byte
+}
+
+func (sm *MockStateMachine) Size() int {
+	return len(sm.blocks)
+}
+
+func (sm *MockStateMachine) GetTailBlocks(n int) (blocks [][]byte, offset int) {
+	if n > len(sm.blocks) {
+		n = len(sm.blocks)
+	}
+	return sm.blocks[:n], 0
+}
+
+func (sm *MockStateMachine) GetId() string {
+	return "mock"
+}
+
+func (sm *MockStateMachine) Apply(block []byte) {
+	sm.blocks = append(sm.blocks, block)
+}
+
 type TestNetwork struct {
 	lastMessageSent        []byte
 	lastRecipient          string
@@ -19,12 +43,12 @@ type TestNetwork struct {
 }
 
 func (net *TestNetwork) Broadcast(msg []byte) {
-	fmt.Printf("NETWORK: broadcasting msg with length %d\n", len(msg))
+	log.Printf("🛜 NETWORK: broadcasting msg with length %d\n", len(msg))
 	net.lastMessageBroadcasted = msg
 }
 
 func (net *TestNetwork) Send(id string, msg []byte) {
-	fmt.Printf("NETWORK: sending msg with length %d to %s\n", len(msg), id)
+	log.Printf("🛜 NETWORK: sending msg with length %d to %s\n", len(msg), id)
 	net.lastMessageSent = msg
 	net.lastRecipient = id
 }
@@ -113,9 +137,9 @@ func TestRaftStepDownDueToHigherTerm(t *testing.T) {
 					id:      true,
 					otherId: true,
 				},
-				electionTimeoutTimer:         time.NewTimer(A_LONG_TIME),
-				voteResponseTimeoutTimer:     time.NewTimer(A_LONG_TIME),
-				followersAppendEntriesTicker: time.NewTicker(A_LONG_TIME),
+				electionTimeoutTimer:     time.NewTimer(A_LONG_TIME),
+				voteResponseTimeoutTimer: time.NewTimer(A_LONG_TIME),
+				sendAppendEntriesTicker:  time.NewTicker(A_LONG_TIME),
 			}
 
 			switch c.initialState {
@@ -191,15 +215,15 @@ func TestConvertToCandidate(t *testing.T) {
 
 	id := "a"
 	raftNode := &RaftNodeImpl{
-		id:                           id,
-		inboundMessages:              make(chan []byte, 1000),
-		state:                        Follower, // could be candidate
-		storage:                      NewInMemoryStorage(),
-		voteMap:                      nil,
-		network:                      dummyNetwork,
-		electionTimeoutTimer:         time.NewTimer(A_LONG_TIME),
-		voteResponseTimeoutTimer:     time.NewTimer(A_LONG_TIME),
-		followersAppendEntriesTicker: time.NewTicker(A_LONG_TIME),
+		id:                       id,
+		inboundMessages:          make(chan []byte, 1000),
+		state:                    Follower, // could be candidate
+		storage:                  NewInMemoryStorage(),
+		voteMap:                  nil,
+		network:                  dummyNetwork,
+		electionTimeoutTimer:     time.NewTimer(A_LONG_TIME),
+		voteResponseTimeoutTimer: time.NewTimer(A_LONG_TIME),
+		sendAppendEntriesTicker:  time.NewTicker(A_LONG_TIME),
 	}
 	previousTerm := raftNode.storage.GetCurrentTerm()
 
@@ -247,10 +271,10 @@ func TestAscendToLeadership(t *testing.T) {
 			"d": true,
 			"e": true,
 		},
-		network:                      dummyNetwork,
-		electionTimeoutTimer:         time.NewTimer(A_LONG_TIME),
-		voteResponseTimeoutTimer:     time.NewTimer(A_LONG_TIME),
-		followersAppendEntriesTicker: time.NewTicker(A_LONG_TIME),
+		network:                  dummyNetwork,
+		electionTimeoutTimer:     time.NewTimer(A_LONG_TIME),
+		voteResponseTimeoutTimer: time.NewTimer(A_LONG_TIME),
+		sendAppendEntriesTicker:  time.NewTicker(A_LONG_TIME),
 	}
 	currentTerm := raftNode.storage.GetCurrentTerm()
 
@@ -433,20 +457,20 @@ func TestFollowerHandleAppendEntries(t *testing.T) {
 
 	createRaftNode := func(id string, term uint64, commitIdx uint64, state RaftState) *RaftNodeImpl {
 		rn := &RaftNodeImpl{
-			id:                           id,
-			stateMachine:                 nil,
-			quitCh:                       make(chan bool),
-			inboundMessages:              make(chan []byte, 1000),
-			network:                      dummyNetwork,
-			state:                        state,
-			storage:                      NewInMemoryStorage(),
-			peers:                        map[string]bool{id: true, leaderId: true, "c": true, "d": true, "e": true},
-			voteMap:                      nil,
-			commitIndex:                  commitIdx,
-			lastApplied:                  0,
-			electionTimeoutTimer:         time.NewTimer(A_LONG_TIME),
-			voteResponseTimeoutTimer:     time.NewTimer(A_LONG_TIME),
-			followersAppendEntriesTicker: time.NewTicker(A_LONG_TIME),
+			id:                       id,
+			stateMachine:             &MockStateMachine{},
+			quitCh:                   make(chan bool),
+			inboundMessages:          make(chan []byte, 1000),
+			network:                  dummyNetwork,
+			state:                    state,
+			storage:                  NewInMemoryStorage(),
+			peers:                    map[string]bool{id: true, leaderId: true, "c": true, "d": true, "e": true},
+			voteMap:                  nil,
+			commitIndex:              commitIdx,
+			lastApplied:              0,
+			electionTimeoutTimer:     time.NewTimer(A_LONG_TIME),
+			voteResponseTimeoutTimer: time.NewTimer(A_LONG_TIME),
+			sendAppendEntriesTicker:  time.NewTicker(A_LONG_TIME),
 		}
 		if term > 0 {
 			rn.storage.SetTerm(term)
@@ -748,21 +772,21 @@ func TestHandleVoteRequest(t *testing.T) {
 
 	createRaftNode := func(id string, term uint64, state RaftState, initLog []*Entry) *RaftNodeImpl {
 		rn := &RaftNodeImpl{
-			id:                           id,
-			stateMachine:                 nil,
-			quitCh:                       make(chan bool),
-			inboundMessages:              make(chan []byte, 1000),
-			network:                      dummyNetwork,
-			state:                        state,
-			storage:                      NewInMemoryStorage(),
-			peers:                        map[string]bool{id: true, candidateId: true, "c": true, "d": true, "e": true},
-			voteMap:                      nil,
-			followersStateMap:            nil,
-			commitIndex:                  0,
-			lastApplied:                  0,
-			electionTimeoutTimer:         time.NewTimer(A_LONG_TIME),
-			voteResponseTimeoutTimer:     time.NewTimer(A_LONG_TIME),
-			followersAppendEntriesTicker: time.NewTicker(A_LONG_TIME),
+			id:                       id,
+			stateMachine:             nil,
+			quitCh:                   make(chan bool),
+			inboundMessages:          make(chan []byte, 1000),
+			network:                  dummyNetwork,
+			state:                    state,
+			storage:                  NewInMemoryStorage(),
+			peers:                    map[string]bool{id: true, candidateId: true, "c": true, "d": true, "e": true},
+			voteMap:                  nil,
+			followersStateMap:        nil,
+			commitIndex:              0,
+			lastApplied:              0,
+			electionTimeoutTimer:     time.NewTimer(A_LONG_TIME),
+			voteResponseTimeoutTimer: time.NewTimer(A_LONG_TIME),
+			sendAppendEntriesTicker:  time.NewTicker(A_LONG_TIME),
 		}
 		if term > 0 {
 			rn.storage.SetTerm(term)
@@ -982,11 +1006,11 @@ func TestHandleAppendEntriesResponse(t *testing.T) {
 					matchIndex: 0,
 				},
 			},
-			commitIndex:                  0,
-			lastApplied:                  0,
-			electionTimeoutTimer:         time.NewTimer(A_LONG_TIME),
-			voteResponseTimeoutTimer:     time.NewTimer(A_LONG_TIME),
-			followersAppendEntriesTicker: time.NewTicker(A_LONG_TIME),
+			commitIndex:              0,
+			lastApplied:              0,
+			electionTimeoutTimer:     time.NewTimer(A_LONG_TIME),
+			voteResponseTimeoutTimer: time.NewTimer(A_LONG_TIME),
+			sendAppendEntriesTicker:  time.NewTicker(A_LONG_TIME),
 		}
 		if term > 0 {
 			rn.storage.SetTerm(term)
@@ -1006,7 +1030,7 @@ func TestHandleAppendEntriesResponse(t *testing.T) {
 		raftNode.processOneTransistion()
 	}
 
-	// TEST: from unknown peer:
+	// from unknown peer:
 	// should ignore
 	t.Run("unknown_peer", func(t *testing.T) {
 		initialTerm := uint64(1)
@@ -1024,7 +1048,7 @@ func TestHandleAppendEntriesResponse(t *testing.T) {
 		assertEqual(t, raftNode.state, Leader)
 	})
 
-	// TEST: response with a higher term:
+	// response with a higher term:
 	// stepdown if leader/candidate
 	// ignore since not leader
 	// update term to match resp
@@ -1045,7 +1069,7 @@ func TestHandleAppendEntriesResponse(t *testing.T) {
 		assertEqual(t, string(dummyNetwork.lastMessageSent), "")
 	})
 
-	// TEST: resp. w/ outdated term: -> ignore
+	// resp. w/ outdated term: -> ignore
 	t.Run("req_lower_term", func(t *testing.T) {
 		initialTerm := uint64(5)
 		raftNode = createRaftNode(id, initialTerm, Leader, []*Entry{})
@@ -1065,7 +1089,7 @@ func TestHandleAppendEntriesResponse(t *testing.T) {
 		assertEqual(t, raftNode.followersStateMap[otherPeerId], prevFollowerState)
 	})
 
-	// TEST: resp. not successful:
+	// resp. not successful:
 	// lower next index
 	// fire a new req. w/ lower prevLogIdx/Term
 	t.Run("not_successful", func(t *testing.T) {
@@ -1150,7 +1174,7 @@ func TestHandleAppendEntriesResponse(t *testing.T) {
 		}
 	})
 
-	// TEST: a successful AppendEntries response:
+	// tests a successful AppendEntries response:
 	// update match/next index
 	t.Run("successful", func(t *testing.T) {
 		testCases := []struct {
@@ -1248,21 +1272,21 @@ func TestUpdateLeaderCommitIndex(t *testing.T) {
 
 	createLeader := func(id string, term uint64, commitIndex uint64, initLog []*Entry, initFollowerMap map[string]*FollowerState) *RaftNodeImpl {
 		rn := &RaftNodeImpl{
-			id:                           id,
-			stateMachine:                 nil,
-			quitCh:                       make(chan bool),
-			inboundMessages:              make(chan []byte, 1000),
-			network:                      dummyNetwork,
-			state:                        Leader,
-			storage:                      NewInMemoryStorage(),
-			peers:                        map[string]bool{id: true, responderPeerId: true, otherPeerId: true},
-			voteMap:                      nil,
-			followersStateMap:            initFollowerMap,
-			commitIndex:                  commitIndex,
-			lastApplied:                  0,
-			electionTimeoutTimer:         time.NewTimer(A_LONG_TIME),
-			voteResponseTimeoutTimer:     time.NewTimer(A_LONG_TIME),
-			followersAppendEntriesTicker: time.NewTicker(A_LONG_TIME),
+			id:                       id,
+			stateMachine:             nil,
+			quitCh:                   make(chan bool),
+			inboundMessages:          make(chan []byte, 1000),
+			network:                  dummyNetwork,
+			state:                    Leader,
+			storage:                  NewInMemoryStorage(),
+			peers:                    map[string]bool{id: true, responderPeerId: true, otherPeerId: true},
+			voteMap:                  nil,
+			followersStateMap:        initFollowerMap,
+			commitIndex:              commitIndex,
+			lastApplied:              0,
+			electionTimeoutTimer:     time.NewTimer(A_LONG_TIME),
+			voteResponseTimeoutTimer: time.NewTimer(A_LONG_TIME),
+			sendAppendEntriesTicker:  time.NewTicker(A_LONG_TIME),
 		}
 		if term > 0 {
 			rn.storage.SetTerm(term)
@@ -1425,20 +1449,20 @@ func TestFollowerElectionTimer(t *testing.T) {
 	peer := "PEER_NODE"
 	electionTimerDuration := 100 * time.Millisecond
 	node := &RaftNodeImpl{
-		id:                           id,
-		stateMachine:                 nil,
-		quitCh:                       make(chan bool),
-		inboundMessages:              make(chan []byte, 1000),
-		network:                      dummyNetwork,
-		state:                        Follower,
-		storage:                      NewInMemoryStorage(),
-		peers:                        map[string]bool{id: true, peer: true},
-		voteMap:                      nil,
-		commitIndex:                  0,
-		lastApplied:                  0,
-		electionTimeoutTimer:         time.NewTimer(electionTimerDuration),
-		voteResponseTimeoutTimer:     time.NewTimer(A_LONG_TIME),
-		followersAppendEntriesTicker: time.NewTicker(A_LONG_TIME),
+		id:                       id,
+		stateMachine:             nil,
+		quitCh:                   make(chan bool),
+		inboundMessages:          make(chan []byte, 1000),
+		network:                  dummyNetwork,
+		state:                    Follower,
+		storage:                  NewInMemoryStorage(),
+		peers:                    map[string]bool{id: true, peer: true},
+		voteMap:                  nil,
+		commitIndex:              0,
+		lastApplied:              0,
+		electionTimeoutTimer:     time.NewTimer(electionTimerDuration),
+		voteResponseTimeoutTimer: time.NewTimer(A_LONG_TIME),
+		sendAppendEntriesTicker:  time.NewTicker(A_LONG_TIME),
 	}
 	node.processOneTransistionInternal(electionTimerDuration / 2)
 	// verify it didn't do anything
@@ -1493,20 +1517,20 @@ func TestSendAppendEntriesTicker(t *testing.T) {
 	peer2 := "PEER_2"
 	electionTimerDuration := 100 * time.Millisecond
 	node := &RaftNodeImpl{
-		id:                           id,
-		stateMachine:                 nil,
-		quitCh:                       make(chan bool),
-		inboundMessages:              make(chan []byte, 1000),
-		network:                      dummyNetwork,
-		state:                        Candidate,
-		storage:                      NewInMemoryStorage(),
-		peers:                        map[string]bool{id: true, peer1: true, peer2: true},
-		voteMap:                      make(map[string]bool, 3),
-		commitIndex:                  0,
-		lastApplied:                  0,
-		electionTimeoutTimer:         time.NewTimer(electionTimerDuration),
-		voteResponseTimeoutTimer:     time.NewTimer(A_LONG_TIME),
-		followersAppendEntriesTicker: time.NewTicker(100 * time.Millisecond),
+		id:                       id,
+		stateMachine:             nil,
+		quitCh:                   make(chan bool),
+		inboundMessages:          make(chan []byte, 1000),
+		network:                  dummyNetwork,
+		state:                    Candidate,
+		storage:                  NewInMemoryStorage(),
+		peers:                    map[string]bool{id: true, peer1: true, peer2: true},
+		voteMap:                  make(map[string]bool, 3),
+		commitIndex:              0,
+		lastApplied:              0,
+		electionTimeoutTimer:     time.NewTimer(electionTimerDuration),
+		voteResponseTimeoutTimer: time.NewTimer(A_LONG_TIME),
+		sendAppendEntriesTicker:  time.NewTicker(100 * time.Millisecond),
 	}
 	node.storage.SetTerm(term)
 
@@ -1521,7 +1545,7 @@ func TestSendAppendEntriesTicker(t *testing.T) {
 	}
 
 	//call processOneTransition#nonBlocking
-	node.processOneTransistionInternal(10 * time.Millisecond)
+	node.processOneTransistionInternal(1 * time.Nanosecond)
 	for follower, followerState := range node.followersStateMap {
 		//..check waitingForAEResponse for all followers is true
 		assertEqual(t, followerState.waitingForAEResponse, true)
@@ -1572,10 +1596,6 @@ func TestSendAppendEntriesTicker(t *testing.T) {
 	node.processOneTransistion()
 
 	//.. check that leader resends message to 1/3
-	for follower, followerState := range node.followersStateMap {
-		shouldRetry := time.Since(node.followersStateMap[follower].aeTimestamp) > aeResponseTimeoutDuration
-		t.Logf("follower: %s, shouldRetry: %t, aeTimestamp: %s", follower, shouldRetry, followerState.aeTimestamp)
-	}
 	assertEqual(t, dummyNetwork.lastRecipient, peer2)
 	if dummyNetwork.lastMessageSent == nil {
 		t.Fatalf("expected message to be resent to %s", peer2)
@@ -1608,19 +1628,19 @@ func TestCandidateReceiveVoteResponseTimeoutTimer(t *testing.T) {
 	peer2 := "PEER_2"
 	electionTimerDuration := 100 * time.Millisecond
 	node := &RaftNodeImpl{
-		id:                           id,
-		stateMachine:                 nil,
-		quitCh:                       make(chan bool),
-		inboundMessages:              make(chan []byte, 1000),
-		network:                      dummyNetwork,
-		state:                        Follower,
-		storage:                      NewInMemoryStorage(),
-		peers:                        map[string]bool{id: true, peer1: true, peer2: true},
-		commitIndex:                  0,
-		lastApplied:                  0,
-		electionTimeoutTimer:         time.NewTimer(electionTimerDuration),
-		voteResponseTimeoutTimer:     time.NewTimer(A_LONG_TIME),
-		followersAppendEntriesTicker: time.NewTicker(A_LONG_TIME),
+		id:                       id,
+		stateMachine:             nil,
+		quitCh:                   make(chan bool),
+		inboundMessages:          make(chan []byte, 1000),
+		network:                  dummyNetwork,
+		state:                    Follower,
+		storage:                  NewInMemoryStorage(),
+		peers:                    map[string]bool{id: true, peer1: true, peer2: true},
+		commitIndex:              0,
+		lastApplied:              0,
+		electionTimeoutTimer:     time.NewTimer(electionTimerDuration),
+		voteResponseTimeoutTimer: time.NewTimer(A_LONG_TIME),
+		sendAppendEntriesTicker:  time.NewTicker(A_LONG_TIME),
 	}
 	node.storage.SetTerm(initTerm)
 

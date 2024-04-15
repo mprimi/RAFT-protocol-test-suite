@@ -2,6 +2,7 @@ package network
 
 import (
 	"fmt"
+	"log"
 	"math/rand"
 	"sync"
 	"time"
@@ -56,7 +57,7 @@ func NewPseudoAsyncNetwork(packetLoss int) Network {
 }
 
 func (net *PseudoAsyncNetwork) Log(format string, args ...any) {
-	fmt.Printf("NETWORK: "+format+"\n", args...)
+	log.Printf("🛜 NETWORK: "+format+"\n", args...)
 }
 
 func (net *PseudoAsyncNetwork) Broadcast(msg []byte) {

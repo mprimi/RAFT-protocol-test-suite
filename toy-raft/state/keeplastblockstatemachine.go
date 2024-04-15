@@ -2,49 +2,67 @@ package state
 
 import (
 	"fmt"
+	"log"
 	"sync"
 )
 
-type KeepLastBlockStateMachine struct {
+type KeepLastBlocksStateMachine struct {
 	Id string
 
 	sync.RWMutex
 
-	// state
-	blockResult []byte
-	blockCount  uint64
+	offset int
+	blocks [][]byte
+
+	n int
 }
 
-func NewKeepLastBlockStateMachine(id string) StateMachine {
-	sm := &KeepLastBlockStateMachine{
+func NewKeepLastBlocksStateMachine(id string, n int) StateMachine {
+	sm := &KeepLastBlocksStateMachine{
 		Id: id,
 		// init state
-		blockResult: make([]byte, 10),
-		blockCount:  0,
+		offset: 0,
+		blocks: make([][]byte, 0, n),
+		n:      n,
 	}
 	return sm
 }
 
-func (sm *KeepLastBlockStateMachine) Log(format string, args ...any) {
-	front := fmt.Sprintf("SM-%s: ", sm.Id)
-	fmt.Printf(front+format+"\n", args...)
+func (sm *KeepLastBlocksStateMachine) Log(format string, args ...any) {
+	front := fmt.Sprintf("💾 SM-%s: ", sm.Id)
+	log.Printf(front+format+"\n", args...)
 }
 
-func (sm *KeepLastBlockStateMachine) GetId() string {
+func (sm *KeepLastBlocksStateMachine) GetId() string {
 	return sm.Id
 }
 
-func (sm *KeepLastBlockStateMachine) Apply(block []byte) {
+func (sm *KeepLastBlocksStateMachine) Apply(block []byte) {
 	sm.Lock()
 	defer sm.Unlock()
-	sm.Log("Applying block %s after block#%d", string(block), sm.blockCount)
 	// replace block
-	sm.blockResult = block
-	sm.blockCount++
+	sm.blocks = append(sm.blocks, block)
+	if len(sm.blocks) > sm.n {
+		discardedElements := len(sm.blocks) - sm.n
+		sm.blocks = sm.blocks[discardedElements:]
+		sm.offset += discardedElements
+	}
+	sm.Log("Applied block %d", sm.offset+len(sm.blocks))
 }
 
-func (sm *KeepLastBlockStateMachine) GetCurrentValue() ([]byte, uint64) {
-	sm.Lock()
-	defer sm.Unlock()
-	return sm.blockResult, sm.blockCount
+// GetTailBlocks returns the last m blocks and the offset (actual index of the first block)
+func (sm *KeepLastBlocksStateMachine) GetTailBlocks(m int) (blocks [][]byte, offset int) {
+	if m > len(sm.blocks) {
+		blocks = sm.blocks
+		offset = sm.offset
+	} else {
+		x := len(sm.blocks) - m
+		blocks = sm.blocks[x:]
+		offset = sm.offset + x
+	}
+	return
+}
+
+func (sm *KeepLastBlocksStateMachine) Size() int {
+	return len(sm.blocks)
 }
