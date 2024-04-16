@@ -34,7 +34,7 @@ func (s *ServerImpl) Propose(blob []byte) error {
 }
 
 func (s *ServerImpl) Get() ([]byte, int) {
-	latestBlock, offset := s.StateMachine.GetBlocks(1)
+	latestBlock, offset := s.StateMachine.GetTailBlocks(1)
 	return latestBlock[0], offset
 }
 

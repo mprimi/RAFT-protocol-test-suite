@@ -146,7 +146,7 @@ func (rn *RaftNodeImpl) processOneTransistionInternal(inactivityTimeout time.Dur
 		switch opType {
 		case AppendEntriesRequestOp:
 			appendEntriesRequest := message.(*AppendEntriesRequest)
-			rn.Log("received AppendEntries request from %s", appendEntriesRequest.LeaderId)
+			rn.Log("received AppendEntries request from %s, leader term: %d, lastLogIdx: %d, lastLogTerm: %d, leaderCommitIdx: %d", appendEntriesRequest.LeaderId, appendEntriesRequest.Term, appendEntriesRequest.PrevLogIdx, appendEntriesRequest.PrevLogTerm, appendEntriesRequest.LeaderCommitIdx)
 
 			// peer is unknown, ignore request
 			if !rn.isKnownPeer(appendEntriesRequest.LeaderId) {
@@ -188,12 +188,12 @@ func (rn *RaftNodeImpl) processOneTransistionInternal(inactivityTimeout time.Dur
 				// no entry exists
 				entry, exists := rn.storage.GetLogEntry(appendEntriesRequest.PrevLogIdx)
 				if !exists {
-					rn.Log("attempted to access log entry at index %d, but it doesn't exist", appendEntriesRequest.PrevLogIdx)
+					rn.Log("found non-existent log entry at index %d when comparing with leader", appendEntriesRequest.PrevLogIdx)
 					resp.Success = false
 					rn.SendMessage(appendEntriesRequest.LeaderId, resp)
 					return
 				} else if entry.Term != appendEntriesRequest.PrevLogTerm {
-					rn.Log("term mismatch for log entry at index %d, expected %d, got %d", appendEntriesRequest.PrevLogIdx, appendEntriesRequest.PrevLogTerm, entry.Term)
+					rn.Log("discovered log inconsistency with leader at index %d, expected term %d, got term %d", appendEntriesRequest.PrevLogIdx, appendEntriesRequest.PrevLogTerm, entry.Term)
 					resp.Success = false
 					rn.SendMessage(appendEntriesRequest.LeaderId, resp)
 					return
@@ -201,22 +201,22 @@ func (rn *RaftNodeImpl) processOneTransistionInternal(inactivityTimeout time.Dur
 			}
 
 			// append entries from request
-			logEntryIdx := appendEntriesRequest.PrevLogIdx + 1
+			logEntryToBeAddedIdx := appendEntriesRequest.PrevLogIdx + 1
+			rn.Log("attempting to add %d entries to log starting at index %d", len(appendEntriesRequest.Entries), logEntryToBeAddedIdx)
 			for i, entry := range appendEntriesRequest.Entries {
-				logEntryIdx += uint64(i)
-				logEntry, exists := rn.storage.GetLogEntry(logEntryIdx)
-				rn.Log("last log entry is index %d", rn.storage.GetLastLogIndex())
+				logEntry, exists := rn.storage.GetLogEntry(logEntryToBeAddedIdx)
 				if !exists {
-					rn.Log("appending entry %+v at index %d", entry, logEntryIdx)
+					rn.Log("appending entry %d/%d (%+v) at index %d", i+1, len(appendEntriesRequest.Entries), entry, logEntryToBeAddedIdx)
 					rn.storage.AppendEntry(&entry)
 				} else if entry.Term != logEntry.Term {
-					rn.Log("deleting entries from index %d", logEntryIdx)
-					rn.storage.DeleteEntriesFrom(logEntryIdx)
-					rn.Log("appending entry %+v at index %d", entry, logEntryIdx)
+					rn.Log("deleting entries from index %d", logEntryToBeAddedIdx)
+					rn.storage.DeleteEntriesFrom(logEntryToBeAddedIdx)
+					rn.Log("appending entry %d/%d (%+v) at index %d", i+1, len(appendEntriesRequest.Entries), entry, logEntryToBeAddedIdx)
 					rn.storage.AppendEntry(&entry)
 				} else {
-					rn.Log("entry %+v already exists at index %d", entry, logEntryIdx)
+					rn.Log("entry %d/%d, already exists at index %d", i+1, len(appendEntriesRequest.Entries), logEntryToBeAddedIdx)
 				}
+				logEntryToBeAddedIdx++
 			}
 			if err := rn.storage.Commit(); err != nil {
 				panic(err)

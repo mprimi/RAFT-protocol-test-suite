@@ -113,6 +113,9 @@ func (store *InMemoryStorage) GetLastLogIndex() uint64 {
 func (store *InMemoryStorage) AppendEntry(entry *Entry) {
 	store.log = append(store.log, entry)
 	store.lastLogIdx++
+	if uint64(len(store.log))+store.offset-1 != store.lastLogIdx {
+		panic(fmt.Sprintf("log length %d + offset %d != last log index %d", len(store.log), store.offset, store.lastLogIdx))
+	}
 }
 
 func (store *InMemoryStorage) GetCurrentTerm() uint64 {
