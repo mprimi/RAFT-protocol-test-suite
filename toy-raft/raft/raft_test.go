@@ -525,8 +525,8 @@ func TestFollowerHandleAppendEntries(t *testing.T) {
 	t.Run("AE with higher term, but no prevLogIdx=3, update term to AE.term", func(t *testing.T) {
 		initialTerm = 1
 		raftNode = createRaftNode(id, initialTerm, 0, Follower)
-		raftNode.storage.AppendEntry(&Entry{Term: 1, Cmd: []byte("foo")})
-		raftNode.storage.AppendEntry(&Entry{Term: 1, Cmd: []byte("bar")})
+		raftNode.storage.AppendEntry(Entry{Term: 1, Cmd: []byte("foo")})
+		raftNode.storage.AppendEntry(Entry{Term: 1, Cmd: []byte("bar")})
 		var (
 			term        uint64 = 3
 			prevLogIdx  uint64 = 3
@@ -557,8 +557,8 @@ func TestFollowerHandleAppendEntries(t *testing.T) {
 	t.Run("AE with higher term, but we have prevLogIdx=2 but its term is not 3, update term to AE.term", func(t *testing.T) {
 		initialTerm = 1
 		raftNode = createRaftNode(id, initialTerm, 0, Follower)
-		raftNode.storage.AppendEntry(&Entry{Term: 1, Cmd: []byte("foo")})
-		raftNode.storage.AppendEntry(&Entry{Term: 1, Cmd: []byte("bar")})
+		raftNode.storage.AppendEntry(Entry{Term: 1, Cmd: []byte("foo")})
+		raftNode.storage.AppendEntry(Entry{Term: 1, Cmd: []byte("bar")})
 		var (
 			term        uint64 = 3
 			prevLogIdx  uint64 = 2
@@ -584,10 +584,10 @@ func TestFollowerHandleAppendEntries(t *testing.T) {
 	// this test has a valid append entries request but it should overwrite a portion of the log
 	t.Run("valid AE request but it should overwrite a portion of the log", func(t *testing.T) {
 		raftNode = createRaftNode(id, 1, 0, Follower)
-		raftNode.storage.AppendEntry(&Entry{Term: 1, Cmd: []byte("foo")})
-		raftNode.storage.AppendEntry(&Entry{Term: 1, Cmd: []byte("bar")})
-		raftNode.storage.AppendEntry(&Entry{Term: 1, Cmd: []byte("faz")})
-		raftNode.storage.AppendEntry(&Entry{Term: 1, Cmd: []byte("foz")})
+		raftNode.storage.AppendEntry(Entry{Term: 1, Cmd: []byte("foo")})
+		raftNode.storage.AppendEntry(Entry{Term: 1, Cmd: []byte("bar")})
+		raftNode.storage.AppendEntry(Entry{Term: 1, Cmd: []byte("faz")})
+		raftNode.storage.AppendEntry(Entry{Term: 1, Cmd: []byte("foz")})
 		aeReq := &AppendEntriesRequest{
 			Term:            2,
 			LeaderId:        leaderId,
@@ -637,10 +637,10 @@ func TestFollowerHandleAppendEntries(t *testing.T) {
 			initialTerm      uint64 = 1
 		)
 		raftNode = createRaftNode(id, initialTerm, initialCommitIdx, Follower)
-		raftNode.storage.AppendEntry(&Entry{Term: 1, Cmd: []byte("foo")})
-		raftNode.storage.AppendEntry(&Entry{Term: 1, Cmd: []byte("bar")})
-		raftNode.storage.AppendEntry(&Entry{Term: 1, Cmd: []byte("faz")})
-		raftNode.storage.AppendEntry(&Entry{Term: 1, Cmd: []byte("foz")})
+		raftNode.storage.AppendEntry(Entry{Term: 1, Cmd: []byte("foo")})
+		raftNode.storage.AppendEntry(Entry{Term: 1, Cmd: []byte("bar")})
+		raftNode.storage.AppendEntry(Entry{Term: 1, Cmd: []byte("faz")})
+		raftNode.storage.AppendEntry(Entry{Term: 1, Cmd: []byte("foz")})
 		var (
 			prevLogIdx   uint64 = 2
 			prevLogTerm  uint64 = 1
@@ -792,7 +792,7 @@ func TestHandleVoteRequest(t *testing.T) {
 			rn.storage.SetTerm(term)
 		}
 		for _, entry := range initLog {
-			rn.storage.AppendEntry(entry)
+			rn.storage.AppendEntry(*entry)
 		}
 		return rn
 	}
@@ -1016,7 +1016,7 @@ func TestHandleAppendEntriesResponse(t *testing.T) {
 			rn.storage.SetTerm(term)
 		}
 		for _, entry := range initLog {
-			rn.storage.AppendEntry(entry)
+			rn.storage.AppendEntry(*entry)
 		}
 		return rn
 	}
@@ -1292,7 +1292,7 @@ func TestUpdateLeaderCommitIndex(t *testing.T) {
 			rn.storage.SetTerm(term)
 		}
 		for _, entry := range initLog {
-			rn.storage.AppendEntry(entry)
+			rn.storage.AppendEntry(*entry)
 		}
 		return rn
 	}

@@ -207,12 +207,12 @@ func (rn *RaftNodeImpl) processOneTransistionInternal(inactivityTimeout time.Dur
 				logEntry, exists := rn.storage.GetLogEntry(logEntryToBeAddedIdx)
 				if !exists {
 					rn.Log("appending entry %d/%d (%+v) at index %d", i+1, len(appendEntriesRequest.Entries), entry, logEntryToBeAddedIdx)
-					rn.storage.AppendEntry(&entry)
+					rn.storage.AppendEntry(entry)
 				} else if entry.Term != logEntry.Term {
 					rn.Log("deleting entries from index %d", logEntryToBeAddedIdx)
 					rn.storage.DeleteEntriesFrom(logEntryToBeAddedIdx)
 					rn.Log("appending entry %d/%d (%+v) at index %d", i+1, len(appendEntriesRequest.Entries), entry, logEntryToBeAddedIdx)
-					rn.storage.AppendEntry(&entry)
+					rn.storage.AppendEntry(entry)
 				} else {
 					rn.Log("entry %d/%d, already exists at index %d", i+1, len(appendEntriesRequest.Entries), logEntryToBeAddedIdx)
 				}
@@ -304,6 +304,7 @@ func (rn *RaftNodeImpl) processOneTransistionInternal(inactivityTimeout time.Dur
 					panic("cannot decrement nextIndex for a follower below 1")
 				}
 				followerState.nextIndex -= 1
+				// BUG: this is being violated
 				if followerState.nextIndex <= followerState.matchIndex {
 					panic("nextIndex must be greater than matchIndex")
 				}
@@ -511,10 +512,11 @@ func (rn *RaftNodeImpl) processOneTransistionInternal(inactivityTimeout time.Dur
 					prevLogTerm = prevLogEntry.Term
 				}
 
+				entriesToSend := rn.entriesToSendToFollower(followerId)
 				rn.sendNewAppendEntryRequest(&AppendEntriesRequest{
 					Term:            currentTerm,
 					LeaderId:        rn.id,
-					Entries:         rn.entriesToSendToFollower(followerId),
+					Entries:         entriesToSend,
 					PrevLogIdx:      prevLogIndex,
 					PrevLogTerm:     prevLogTerm,
 					LeaderCommitIdx: rn.commitIndex,
@@ -722,23 +724,29 @@ func (rn *RaftNodeImpl) Log(format string, args ...any) {
 
 var ErrNotLeader = fmt.Errorf("not leader")
 
-// TODO: route to leader
 func (rn *RaftNodeImpl) Propose(msg []byte) error {
 	if rn.state == Leader {
-
 		msgCopy := make([]byte, len(msg))
-		if copy(msgCopy, msg) != len(msg) {
-			panic("wtf")
-		}
-
+		copy(msgCopy, msg)
 		// encode
-		entry := &Entry{
+		entry := Entry{
 			Term: rn.storage.GetCurrentTerm(),
 			Cmd:  msgCopy,
 		}
-		rn.Log("proposing block of length %d", len(msg))
 		rn.storage.AppendEntry(entry)
+
+		rn.Log("proposing block of length %d to cluster", len(msg))
+		prevLogIdx, prevLogTerm := rn.storage.GetLastLogIndexAndTerm()
+		rn.BroadcastToCluster(&AppendEntriesRequest{
+			Term:            rn.storage.GetCurrentTerm(),
+			LeaderId:        rn.id,
+			Entries:         rn.storage.GetLogEntriesFrom(prevLogIdx),
+			PrevLogIdx:      prevLogIdx,
+			PrevLogTerm:     prevLogTerm,
+			LeaderCommitIdx: rn.commitIndex,
+		})
 	} else {
+		// TODO: if follower, route to leader
 		return ErrNotLeader
 	}
 	return nil
@@ -746,6 +754,16 @@ func (rn *RaftNodeImpl) Propose(msg []byte) error {
 
 func (rn *RaftNodeImpl) Receive(msg []byte) {
 	rn.inboundMessages <- msg
+}
+
+func (rn *RaftNodeImpl) BroadcastToCluster(msg RaftOperation) {
+	opType := msg.OpType()
+	msgEnvelope := Envelope{
+		OperationType: opType,
+		Payload:       msg.Bytes(),
+	}
+	rn.Log("broadcasting %s to cluster: %+v", opType, msg)
+	rn.network.Broadcast(msgEnvelope.Bytes())
 }
 
 func (rn *RaftNodeImpl) SendMessage(peerId string, msg RaftOperation) {

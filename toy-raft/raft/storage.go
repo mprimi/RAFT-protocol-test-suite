@@ -1,6 +1,8 @@
 package raft
 
-import "fmt"
+import (
+	"fmt"
+)
 
 /*
 When mutating term, votedFor gets cleared
@@ -17,7 +19,7 @@ type Storage interface {
 	Voted() bool
 	VoteFor(id string, currentTerm uint64)
 	// Log Methods
-	AppendEntry(entry *Entry)
+	AppendEntry(entry Entry)
 	GetLastLogIndex() uint64
 	GetLastLogIndexAndTerm() (index uint64, term uint64)
 	DeleteEntriesFrom(index uint64)
@@ -110,8 +112,8 @@ func (store *InMemoryStorage) GetLastLogIndex() uint64 {
 	return store.lastLogIdx
 }
 
-func (store *InMemoryStorage) AppendEntry(entry *Entry) {
-	store.log = append(store.log, entry)
+func (store *InMemoryStorage) AppendEntry(entry Entry) {
+	store.log = append(store.log, &entry)
 	store.lastLogIdx++
 	if uint64(len(store.log))+store.offset-1 != store.lastLogIdx {
 		panic(fmt.Sprintf("log length %d + offset %d != last log index %d", len(store.log), store.offset, store.lastLogIdx))
