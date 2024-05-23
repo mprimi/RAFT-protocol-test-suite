@@ -146,7 +146,7 @@ func (rn *RaftNodeImpl) processOneTransistionInternal(inactivityTimeout time.Dur
 		switch opType {
 		case AppendEntriesRequestOp:
 			appendEntriesRequest := message.(*AppendEntriesRequest)
-			rn.Log("received AppendEntries request from %s, leader term: %d, lastLogIdx: %d, lastLogTerm: %d, leaderCommitIdx: %d", appendEntriesRequest.LeaderId, appendEntriesRequest.Term, appendEntriesRequest.PrevLogIdx, appendEntriesRequest.PrevLogTerm, appendEntriesRequest.LeaderCommitIdx)
+			rn.Log("received AppendEntries request from %s, leader term: %d, prevLogIdx: %d, prevLogTerm: %d, leaderCommitIdx: %d", appendEntriesRequest.LeaderId, appendEntriesRequest.Term, appendEntriesRequest.PrevLogIdx, appendEntriesRequest.PrevLogTerm, appendEntriesRequest.LeaderCommitIdx)
 
 			// peer is unknown, ignore request
 			if !rn.isKnownPeer(appendEntriesRequest.LeaderId) {
@@ -301,7 +301,7 @@ func (rn *RaftNodeImpl) processOneTransistionInternal(inactivityTimeout time.Dur
 			} else {
 				// NOTE: this only executes if log doesn't match
 				if followerState.nextIndex == 1 {
-					panic("cannot decrement nextIndex for a follower below 1")
+					panic(fmt.Sprintf("cannot decrement nextIndex for follower %s below 1", appendEntriesResponse.ResponderId))
 				}
 				followerState.nextIndex -= 1
 				// BUG: this is being violated
@@ -718,7 +718,7 @@ func (rn *RaftNodeImpl) Log(format string, args ...any) {
 		icon = "🪵"
 	}
 
-	header := fmt.Sprintf("%s RAFT-%s (%s term:%d commit:%d applied:%d): ", icon, rn.id, rn.state, rn.storage.GetCurrentTerm(), rn.commitIndex, rn.lastApplied)
+	header := fmt.Sprintf("%s RAFT-%s (%s term:%d lastLogIdx:%d commit:%d applied:%d): ", icon, rn.id, rn.state, rn.storage.GetCurrentTerm(), rn.storage.GetLastLogIndex(), rn.commitIndex, rn.lastApplied)
 	log.Printf(header+format+"\n", args...)
 }
 
@@ -734,17 +734,6 @@ func (rn *RaftNodeImpl) Propose(msg []byte) error {
 			Cmd:  msgCopy,
 		}
 		rn.storage.AppendEntry(entry)
-
-		rn.Log("proposing block of length %d to cluster", len(msg))
-		prevLogIdx, prevLogTerm := rn.storage.GetLastLogIndexAndTerm()
-		rn.BroadcastToCluster(&AppendEntriesRequest{
-			Term:            rn.storage.GetCurrentTerm(),
-			LeaderId:        rn.id,
-			Entries:         rn.storage.GetLogEntriesFrom(prevLogIdx),
-			PrevLogIdx:      prevLogIdx,
-			PrevLogTerm:     prevLogTerm,
-			LeaderCommitIdx: rn.commitIndex,
-		})
 	} else {
 		// TODO: if follower, route to leader
 		return ErrNotLeader

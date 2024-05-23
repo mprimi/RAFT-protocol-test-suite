@@ -53,7 +53,7 @@ func main() {
 				} else if err != nil {
 					panic(err)
 				} else {
-					log.Printf("👹 Proposed block %d: %v\n", blocksProposed, buffer)
+					log.Printf("👹 proposed block %d: %v\n", blocksProposed, buffer)
 					blocksProposed++
 				}
 			}
