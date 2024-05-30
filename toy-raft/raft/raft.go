@@ -218,6 +218,7 @@ func (rn *RaftNodeImpl) processOneTransistionInternal(inactivityTimeout time.Dur
 				}
 				logEntryToBeAddedIdx++
 			}
+			// TODO: evaluate if we still need this
 			if err := rn.storage.Commit(); err != nil {
 				panic(err)
 			}
