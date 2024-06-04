@@ -12,7 +12,7 @@ type Storage interface {
 	Voted() bool
 	VoteFor(id string, currentTerm uint64)
 	// Log Methods
-	AppendEntry(entry Entry)
+	AppendEntry(entry Entry) error
 	GetLastLogIndex() uint64
 	GetLastLogIndexAndTerm() (index uint64, term uint64)
 	DeleteEntriesFrom(index uint64)
