@@ -1,7 +1,6 @@
 package raft
 
 type Storage interface {
-	Commit() error
 
 	GetCurrentTerm() uint64
 	// zeroes votedFor as a side effect
@@ -11,11 +10,14 @@ type Storage interface {
 	GetVotedFor() string
 	Voted() bool
 	VoteFor(id string, currentTerm uint64)
-	// Log Methods
+
+	// does not commit transaction
 	AppendEntry(entry Entry) error
+	// does not commit transaction
+	DeleteEntriesFrom(index uint64)
+
 	GetLastLogIndex() uint64
 	GetLastLogIndexAndTerm() (index uint64, term uint64)
-	DeleteEntriesFrom(index uint64)
 	GetLogEntriesFrom(index uint64) []Entry
 	TestGetLogEntries() []*Entry
 	GetLogEntry(index uint64) (*Entry, bool)

@@ -218,10 +218,6 @@ func (rn *RaftNodeImpl) processOneTransistionInternal(inactivityTimeout time.Dur
 				}
 				logEntryToBeAddedIdx++
 			}
-			// TODO: evaluate if we still need this
-			if err := rn.storage.Commit(); err != nil {
-				panic(err)
-			}
 
 			// update commit index
 			indexOfLastNewEntry := appendEntriesRequest.PrevLogIdx + uint64(len(appendEntriesRequest.Entries))
@@ -755,7 +751,9 @@ func (rn *RaftNodeImpl) Propose(msg []byte) error {
 			Term: rn.storage.GetCurrentTerm(),
 			Cmd:  msgCopy,
 		}
-		rn.storage.AppendEntry(entry)
+		if err := rn.storage.AppendEntry(entry); err != nil {
+			panic(err)
+		}
 	} else {
 		// TODO: if follower, route to leader
 		return ErrNotLeader

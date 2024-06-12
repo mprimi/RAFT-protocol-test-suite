@@ -9,21 +9,18 @@ import (
 )
 
 var (
-	TermKey = []byte("term")
-	VoteKey = []byte("vote")
+	TermKey       = []byte("term")
+	VoteKey       = []byte("vote")
+	LastLogIdxKey = []byte("lastLogIdx")
 )
 
 type InMemoryStorage struct {
-	lastLogIdx uint64
-	offset     uint64
-
 	db *badger.DB
 }
 
 type logEntry struct {
-	LogIndex uint64 // 1-based
-	Data     []byte
-	Term     uint64
+	Data []byte
+	Term uint64
 }
 
 func NewInMemoryStorage() Storage {
@@ -34,42 +31,118 @@ func NewInMemoryStorage() Storage {
 	}
 
 	store := &InMemoryStorage{
-		lastLogIdx: 0,
-		offset:     1,
-
 		db: db,
 	}
 
 	// initialize term
 	store.SetTerm(0)
 
+	// initialize log
+	store.setLastLogIdx(0)
+
 	return store
 }
 
-func (store *InMemoryStorage) Commit() error {
-	return nil
-}
+func (store *InMemoryStorage) setLastLogIdx(newLastLogIdx uint64) {
 
-func (store *InMemoryStorage) toLogIndex(arrIdx int) uint64 {
-	return uint64(arrIdx) + store.offset
-}
-
-func (store *InMemoryStorage) toArrIndex(logIdx uint64) int {
-	if logIdx < store.offset {
-		panic(fmt.Sprintf("log index %d is less than offset %d", logIdx, store.offset))
+	currentLastLogIdx := store.GetLastLogIndex()
+	if currentLastLogIdx == 0 && newLastLogIdx == 0 {
+		// initial case, don't panic
+	} else if newLastLogIdx == currentLastLogIdx {
+		panic(fmt.Sprintf("attempted to set lastLogIdx to %d when it was %d", newLastLogIdx, currentLastLogIdx))
 	}
-	return int(logIdx - store.offset)
+
+	buf := make([]byte, 8)
+	binary.BigEndian.PutUint64(buf, newLastLogIdx)
+
+	if err := store.db.Update(func(txn *badger.Txn) error {
+		if err := txn.Set(LastLogIdxKey, buf); err != nil {
+			return fmt.Errorf("failed to set lastLogIdx: %s", err)
+		}
+		return nil
+	}); err != nil {
+		panic(err)
+	}
 }
 
-func (store *InMemoryStorage) GetLogEntry(logIdx uint64) (*Entry, bool) {
-	return nil, false
+func (store *InMemoryStorage) GetLogEntry(idx uint64) (*Entry, bool) {
+	if idx == 0 {
+		panic("index cannot be zero")
+	}
+
+	lastLogIdx := store.GetLastLogIndex()
+	if idx > lastLogIdx {
+		return nil, false
+	}
+
+	var entry *Entry
+	err := store.db.View(func(txn *badger.Txn) error {
+		item, err := txn.Get(store.idxToKey(idx))
+		if err != nil {
+			return fmt.Errorf("failed to get store entry at index %d: %w", idx, err)
+		}
+
+		if err := item.Value(func(val []byte) error {
+			x := LoadEntry(val)
+			entry = &x
+			return nil
+		}); err != nil {
+			return err
+		}
+		return nil
+	})
+	if err != nil {
+		panic(err)
+	}
+
+	return entry, true
 }
 
 func (store *InMemoryStorage) TestGetLogEntries() []*Entry {
-	return nil
+	lastLogIdx := store.GetLastLogIndex()
+	entries := make([]*Entry, 0, lastLogIdx)
+	err := store.db.View(func(txn *badger.Txn) error {
+		for idx := uint64(1); idx <= lastLogIdx; idx++ {
+
+			item, err := txn.Get(store.idxToKey(idx))
+			if err != nil {
+				return fmt.Errorf("failed to get store entry at index %d: %w", idx, err)
+			}
+
+			if err := item.Value(func(val []byte) error {
+				x := LoadEntry(val)
+				entries = append(entries, &x)
+				return nil
+			}); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		panic(err)
+	}
+	return entries
 }
 
-func (store *InMemoryStorage) DeleteEntriesFrom(logIdx uint64) {
+func (store *InMemoryStorage) DeleteEntriesFrom(startingLogIdx uint64) {
+	if startingLogIdx == 0 {
+		panic("cannot delete from 0, indexes start at 1")
+	}
+	lastLogIdx := store.GetLastLogIndex()
+	err := store.db.Update(func(txn *badger.Txn) error {
+		for idx := startingLogIdx; idx <= lastLogIdx; idx++ {
+			err := txn.Delete(store.idxToKey(idx))
+			if err != nil {
+				return fmt.Errorf("failed to delete key at index %d: %w", idx, err)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		panic(err)
+	}
+	store.setLastLogIdx(startingLogIdx - 1)
 }
 
 func (store *InMemoryStorage) GetLastLogIndexAndTerm() (index uint64, term uint64) {
@@ -87,49 +160,55 @@ func (store *InMemoryStorage) GetLastLogIndexAndTerm() (index uint64, term uint6
 }
 
 func (store *InMemoryStorage) GetLastLogIndex() uint64 {
-	return store.lastLogIdx
+
+	var lastLogIdx uint64
+	store.db.View(func(txn *badger.Txn) error {
+		item, err := txn.Get(LastLogIdxKey)
+		if errors.Is(err, badger.ErrKeyNotFound) {
+			// key doesn't exist yet
+			return nil
+		}
+
+		if err != nil {
+			return fmt.Errorf("failed to get lastLogIdx: %w", err)
+		}
+
+		err = item.Value(func(val []byte) error {
+			lastLogIdx = binary.BigEndian.Uint64(val)
+			return nil
+		})
+		if err != nil {
+			return fmt.Errorf("failed to read value of lastLogIdx item: %w", err)
+		}
+		return nil
+	})
+	return lastLogIdx
+}
+
+func (store *InMemoryStorage) idxToKey(idx uint64) []byte {
+	return []byte(fmt.Sprintf("%d", idx))
 }
 
 func (store *InMemoryStorage) AppendEntry(entry Entry) error {
 
-	//var logLength int
-	//if err := store.db.Update(func(txn *badger.Txn) error {
+	lastLogIdx := store.GetLastLogIndex()
+	entryIdx := lastLogIdx + 1
 
-	//item, err := txn.Get([]byte(LogKey))
-	//switch err {
-	//case badger.ErrKeyNotFound:
-	//// no log yet
-	//panic("no log yet")
-	//case nil:
-	//// log exists
-	//default:
-	//return fmt.Errorf("failed to get log: %s", err)
-	//}
+	key := store.idxToKey(entryIdx)
+	value := entry.Bytes()
 
-	//logBytes := make([]byte, item.ValueSize())
-	//if _, err := item.ValueCopy(logBytes); err != nil {
-	//return fmt.Errorf("failed to copy log bytes: %s", err)
-	//}
+	// put in log
+	if err := store.db.Update(func(txn *badger.Txn) error {
+		if err := txn.Set(key, value); err != nil {
+			return fmt.Errorf("failed to append entry at index %d: %w", entryIdx, err)
+		}
+		return nil
+	}); err != nil {
+		panic(err)
+	}
 
-	//logEntries := LoadLogEntries(logBytes)
-
-	//newLogEntry := logEntry{
-	//LogIndex: store.lastLogIdx + 1,
-	//Data:     entry.Cmd,
-	//Term:     entry.Term,
-	//}
-	//logEntries = append(logEntries, newLogEntry)
-
-	//logLength = len(logEntries)
-
-	//return txn.Set([]byte(LogKey), logEntries.Bytes())
-	//}); err != nil {
-	//return fmt.Errorf("failed to append entry: %s", err)
-	//}
-	//store.lastLogIdx++
-	//if uint64(logLength)+store.offset-1 != store.lastLogIdx {
-	//panic(fmt.Sprintf("log length %d + offset %d != last log index %d", logLength, store.offset, store.lastLogIdx))
-	//}
+	// update lastLogIdx
+	store.setLastLogIdx(entryIdx)
 
 	return nil
 }
@@ -152,8 +231,30 @@ func (store *InMemoryStorage) VoteFor(id string, currentTerm uint64) {
 	}
 }
 
-func (store *InMemoryStorage) GetLogEntriesFrom(logIdx uint64) []Entry {
-	return nil
+func (store *InMemoryStorage) GetLogEntriesFrom(startingLogIdx uint64) []Entry {
+	lastLogIdx := store.GetLastLogIndex()
+	entries := make([]Entry, 0, lastLogIdx-startingLogIdx+1)
+	err := store.db.View(func(txn *badger.Txn) error {
+		for idx := startingLogIdx; idx <= lastLogIdx; idx++ {
+
+			item, err := txn.Get(store.idxToKey(idx))
+			if err != nil {
+				return fmt.Errorf("failed to get store entry at index %d: %w", idx, err)
+			}
+
+			if err := item.Value(func(val []byte) error {
+				entries = append(entries, LoadEntry(val))
+				return nil
+			}); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		panic(err)
+	}
+	return entries
 }
 
 func (store *InMemoryStorage) GetVotedFor() string {
