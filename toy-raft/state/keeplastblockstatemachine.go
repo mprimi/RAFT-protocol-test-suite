@@ -1,20 +1,23 @@
 package state
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
-	"sync"
 )
 
 type KeepLastBlocksStateMachine struct {
 	Id string
 
-	sync.RWMutex
-
 	offset int
 	blocks [][]byte
 
 	n int
+}
+
+type Snapshot struct {
+	Blocks [][]byte `json:"blocks"`
+	Offset int      `json:"offset"`
 }
 
 func NewKeepLastBlocksStateMachine(id string, n int) StateMachine {
@@ -38,8 +41,6 @@ func (sm *KeepLastBlocksStateMachine) GetId() string {
 }
 
 func (sm *KeepLastBlocksStateMachine) Apply(block []byte) {
-	sm.Lock()
-	defer sm.Unlock()
 	// replace block
 	sm.blocks = append(sm.blocks, block)
 	if len(sm.blocks) > sm.n {
@@ -65,4 +66,32 @@ func (sm *KeepLastBlocksStateMachine) GetTailBlocks(m int) (blocks [][]byte, off
 
 func (sm *KeepLastBlocksStateMachine) Size() int {
 	return len(sm.blocks)
+}
+
+func (sm *KeepLastBlocksStateMachine) CreateSnapshot() ([]byte, error) {
+	snapshot := Snapshot{
+		Blocks: sm.blocks,
+		Offset: sm.offset,
+	}
+
+	snapshotBytes, err := json.Marshal(snapshot)
+	if err != nil {
+		return nil, err
+	}
+
+	return snapshotBytes, nil
+}
+
+func (sm *KeepLastBlocksStateMachine) InstallSnapshot(snapshotBytes []byte) error {
+	var snapshot Snapshot
+
+	err := json.Unmarshal(snapshotBytes, &snapshot)
+	if err != nil {
+		return err
+	}
+
+	sm.blocks = snapshot.Blocks
+	sm.offset = snapshot.Offset
+
+	return nil
 }

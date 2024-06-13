@@ -36,6 +36,15 @@ func (sm *MockStateMachine) Apply(block []byte) {
 	sm.blocks = append(sm.blocks, block)
 }
 
+func (sm *MockStateMachine) InstallSnapshot(snapshot []byte) error {
+	panic("todo")
+}
+
+func (sm *MockStateMachine) CreateSnapshot() ([]byte, error) {
+	panic("todo")
+}
+
+
 type TestNetwork struct {
 	lastMessageSent        []byte
 	lastRecipient          string

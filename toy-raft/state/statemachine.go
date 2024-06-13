@@ -12,4 +12,8 @@ type StateMachine interface {
 
 	// should only be called by raft layer
 	Apply(block []byte)
+
+	CreateSnapshot() ([]byte, error)
+
+	InstallSnapshot(snapshot []byte) error
 }
