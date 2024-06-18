@@ -11,9 +11,7 @@ type Storage interface {
 	Voted() bool
 	VoteFor(id string, currentTerm uint64)
 
-	// does not commit transaction
 	AppendEntry(entry Entry) error
-	// does not commit transaction
 	DeleteEntriesFrom(index uint64)
 
 	GetLastLogIndex() uint64
@@ -21,4 +19,5 @@ type Storage interface {
 	GetLogEntriesFrom(index uint64) []Entry
 	TestGetLogEntries() []*Entry
 	GetLogEntry(index uint64) (*Entry, bool)
+	Close() error
 }

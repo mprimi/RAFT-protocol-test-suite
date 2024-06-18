@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"path/filepath"
 
 	"github.com/dgraph-io/badger/v4"
 )
@@ -14,7 +15,7 @@ var (
 	LastLogIdxKey = []byte("lastLogIdx")
 )
 
-type InMemoryStorage struct {
+type BadgerStorage struct {
 	db *badger.DB
 }
 
@@ -23,27 +24,67 @@ type logEntry struct {
 	Term uint64
 }
 
-func NewInMemoryStorage() Storage {
+func NewDiskStorage(replicaId string, baseDir string) Storage {
+	dbPath := filepath.Join(baseDir, replicaId)
+	db, err := badger.Open(badger.DefaultOptions(dbPath))
+	if err != nil {
+		panic(fmt.Sprintf("failed to initialize database at %s: %s", dbPath, err))
+	}
 
+	store := &BadgerStorage{
+		db: db,
+	}
+
+	// if term is found, this is an already existing db
+	var keyExists bool
+	err = db.View(func(txn *badger.Txn) error {
+		_, err = txn.Get(TermKey)
+		if errors.Is(err, badger.ErrKeyNotFound) {
+			// key doesn't exist
+		} else if err != nil {
+			return err
+		} else {
+			keyExists = true
+		}
+		return nil
+	})
+	if err != nil {
+		panic(fmt.Sprintf("error checking for term upon init: %s", err))
+	}
+	if !keyExists {
+		store.storageInit()
+	}
+
+	return store
+}
+
+func NewInMemoryStorage() Storage {
 	db, err := badger.Open(badger.DefaultOptions("").WithInMemory(true))
 	if err != nil {
 		panic(fmt.Sprintf("failed to start in-memory datastore: %s", err))
 	}
 
-	store := &InMemoryStorage{
+	store := &BadgerStorage{
 		db: db,
 	}
+	store.storageInit()
 
+	return store
+}
+
+func (store *BadgerStorage) Close() error {
+	return store.db.Close()
+}
+
+func (store *BadgerStorage) storageInit() {
 	// initialize term
 	store.SetTerm(0)
 
 	// initialize log
 	store.setLastLogIdx(0)
-
-	return store
 }
 
-func (store *InMemoryStorage) setLastLogIdx(newLastLogIdx uint64) {
+func (store *BadgerStorage) setLastLogIdx(newLastLogIdx uint64) {
 
 	currentLastLogIdx := store.GetLastLogIndex()
 	if currentLastLogIdx == 0 && newLastLogIdx == 0 {
@@ -65,7 +106,7 @@ func (store *InMemoryStorage) setLastLogIdx(newLastLogIdx uint64) {
 	}
 }
 
-func (store *InMemoryStorage) GetLogEntry(idx uint64) (*Entry, bool) {
+func (store *BadgerStorage) GetLogEntry(idx uint64) (*Entry, bool) {
 	if idx == 0 {
 		panic("index cannot be zero")
 	}
@@ -98,7 +139,7 @@ func (store *InMemoryStorage) GetLogEntry(idx uint64) (*Entry, bool) {
 	return entry, true
 }
 
-func (store *InMemoryStorage) TestGetLogEntries() []*Entry {
+func (store *BadgerStorage) TestGetLogEntries() []*Entry {
 	lastLogIdx := store.GetLastLogIndex()
 	entries := make([]*Entry, 0, lastLogIdx)
 	err := store.db.View(func(txn *badger.Txn) error {
@@ -125,7 +166,7 @@ func (store *InMemoryStorage) TestGetLogEntries() []*Entry {
 	return entries
 }
 
-func (store *InMemoryStorage) DeleteEntriesFrom(startingLogIdx uint64) {
+func (store *BadgerStorage) DeleteEntriesFrom(startingLogIdx uint64) {
 	if startingLogIdx == 0 {
 		panic("cannot delete from 0, indexes start at 1")
 	}
@@ -145,7 +186,7 @@ func (store *InMemoryStorage) DeleteEntriesFrom(startingLogIdx uint64) {
 	store.setLastLogIdx(startingLogIdx - 1)
 }
 
-func (store *InMemoryStorage) GetLastLogIndexAndTerm() (index uint64, term uint64) {
+func (store *BadgerStorage) GetLastLogIndexAndTerm() (index uint64, term uint64) {
 	index = store.GetLastLogIndex()
 	if index == 0 {
 		term = 0
@@ -159,7 +200,7 @@ func (store *InMemoryStorage) GetLastLogIndexAndTerm() (index uint64, term uint6
 	return
 }
 
-func (store *InMemoryStorage) GetLastLogIndex() uint64 {
+func (store *BadgerStorage) GetLastLogIndex() uint64 {
 
 	var lastLogIdx uint64
 	store.db.View(func(txn *badger.Txn) error {
@@ -185,11 +226,14 @@ func (store *InMemoryStorage) GetLastLogIndex() uint64 {
 	return lastLogIdx
 }
 
-func (store *InMemoryStorage) idxToKey(idx uint64) []byte {
+func (store *BadgerStorage) idxToKey(idx uint64) []byte {
 	return []byte(fmt.Sprintf("%d", idx))
 }
 
-func (store *InMemoryStorage) AppendEntry(entry Entry) error {
+func (store *BadgerStorage) AppendEntry(entry Entry) error {
+	if store.GetCurrentTerm() == 0 {
+		panic("appending entry when our term is 0")
+	}
 
 	lastLogIdx := store.GetLastLogIndex()
 	entryIdx := lastLogIdx + 1
@@ -213,7 +257,7 @@ func (store *InMemoryStorage) AppendEntry(entry Entry) error {
 	return nil
 }
 
-func (store *InMemoryStorage) VoteFor(id string, currentTerm uint64) {
+func (store *BadgerStorage) VoteFor(id string, currentTerm uint64) {
 	storedCurrentTerm := store.GetCurrentTerm()
 	if storedCurrentTerm != currentTerm {
 		panic(fmt.Sprintf("tried to vote for term %d, but current term is %d", currentTerm, storedCurrentTerm))
@@ -231,7 +275,7 @@ func (store *InMemoryStorage) VoteFor(id string, currentTerm uint64) {
 	}
 }
 
-func (store *InMemoryStorage) GetLogEntriesFrom(startingLogIdx uint64) []Entry {
+func (store *BadgerStorage) GetLogEntriesFrom(startingLogIdx uint64) []Entry {
 	lastLogIdx := store.GetLastLogIndex()
 	entries := make([]Entry, 0, lastLogIdx-startingLogIdx+1)
 	err := store.db.View(func(txn *badger.Txn) error {
@@ -257,7 +301,7 @@ func (store *InMemoryStorage) GetLogEntriesFrom(startingLogIdx uint64) []Entry {
 	return entries
 }
 
-func (store *InMemoryStorage) GetVotedFor() string {
+func (store *BadgerStorage) GetVotedFor() string {
 	votedFor := ""
 	if err := store.db.View(func(txn *badger.Txn) error {
 		item, err := txn.Get(VoteKey)
@@ -276,12 +320,12 @@ func (store *InMemoryStorage) GetVotedFor() string {
 	return votedFor
 }
 
-func (store *InMemoryStorage) Voted() bool {
+func (store *BadgerStorage) Voted() bool {
 	return store.GetVotedFor() != ""
 }
 
 // clears vote
-func (store *InMemoryStorage) SetTerm(term uint64) {
+func (store *BadgerStorage) SetTerm(term uint64) {
 	currentTerm := store.GetCurrentTerm()
 	if currentTerm == 0 && term == 0 {
 		// initial case, don't panic
@@ -305,7 +349,7 @@ func (store *InMemoryStorage) SetTerm(term uint64) {
 	}
 }
 
-func (store *InMemoryStorage) GetCurrentTerm() uint64 {
+func (store *BadgerStorage) GetCurrentTerm() uint64 {
 	var term uint64
 	store.db.View(func(txn *badger.Txn) error {
 		item, err := txn.Get(TermKey)
@@ -330,7 +374,7 @@ func (store *InMemoryStorage) GetCurrentTerm() uint64 {
 	return term
 }
 
-func (store *InMemoryStorage) IncrementTerm() uint64 {
+func (store *BadgerStorage) IncrementTerm() uint64 {
 	newTerm := store.GetCurrentTerm() + 1
 	store.SetTerm(newTerm)
 	return newTerm
