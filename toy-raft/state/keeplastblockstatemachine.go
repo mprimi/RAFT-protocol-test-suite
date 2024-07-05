@@ -4,14 +4,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"time"
 )
 
 type KeepLastBlocksStateMachine struct {
 	Id string
 
-	offset int
-	blocks [][]byte
+	offset       int
+	blocks       [][]byte
+	appliedCount uint64
 
 	n int
 }
@@ -21,13 +21,14 @@ type Snapshot struct {
 	Offset int      `json:"offset"`
 }
 
-func NewKeepLastBlocksStateMachine(id string, n int) StateMachine {
+func NewKeepLastBlocksStateMachine(id string, n int) *KeepLastBlocksStateMachine {
 	sm := &KeepLastBlocksStateMachine{
 		Id: id,
 		// init state
-		offset: 0,
-		blocks: make([][]byte, 0, n),
-		n:      n,
+		offset:       0,
+		blocks:       make([][]byte, 0, n),
+		n:            n,
+		appliedCount: 0,
 	}
 	return sm
 }
@@ -49,6 +50,7 @@ func (sm *KeepLastBlocksStateMachine) Apply(block []byte) {
 		sm.blocks = sm.blocks[discardedElements:]
 		sm.offset += discardedElements
 	}
+	sm.appliedCount++
 	sm.Log("Applied block %d", sm.offset+len(sm.blocks))
 }
 
@@ -65,8 +67,8 @@ func (sm *KeepLastBlocksStateMachine) GetTailBlocks(m int) (blocks [][]byte, off
 	return
 }
 
-func (sm *KeepLastBlocksStateMachine) Size() int {
-	return len(sm.blocks)
+func (sm *KeepLastBlocksStateMachine) Applied() uint64 {
+	return sm.appliedCount
 }
 
 func (sm *KeepLastBlocksStateMachine) CreateSnapshot() ([]byte, error) {

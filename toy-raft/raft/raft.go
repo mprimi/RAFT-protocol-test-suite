@@ -642,6 +642,9 @@ func (rn *RaftNodeImpl) convertToCandidate() {
 }
 
 // this method is triggered by receiving an RPC with a higher term, regardless of state
+// TODO: turn the following logic into a switch-case,
+// remove unconditional reset of electionTimer
+// restart electionTimer for valid previousStates (Candidate|Leader)
 func (rn *RaftNodeImpl) stepdown() {
 
 	var logMsg string
@@ -682,6 +685,7 @@ func (rn *RaftNodeImpl) stepdown() {
 	// convert to follower
 	rn.state = Follower
 	// reset election timer so we can give candidate time to resolve election
+	// BUG: should not reset timer if follower
 	resetAndDrainTimer(rn.electionTimeoutTimer, randomTimerDuration(minElectionTimeout, maxElectionTimeout))
 	rn.Log(logMsg)
 }

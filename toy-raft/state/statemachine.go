@@ -2,10 +2,7 @@ package state
 
 type StateMachine interface {
 
-	Size() int
-
-	// return the last n blocks and the index of the first block
-	GetTailBlocks(n int) (blocks [][]byte, offset int)
+	Applied() uint64
 
 	// META
 	GetId() string

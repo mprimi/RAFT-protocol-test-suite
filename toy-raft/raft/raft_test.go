@@ -17,8 +17,8 @@ type MockStateMachine struct {
 	blocks [][]byte
 }
 
-func (sm *MockStateMachine) Size() int {
-	return len(sm.blocks)
+func (sm *MockStateMachine) Applied() uint64 {
+	return uint64(len(sm.blocks))
 }
 
 func (sm *MockStateMachine) GetTailBlocks(n int) (blocks [][]byte, offset int) {
@@ -43,7 +43,6 @@ func (sm *MockStateMachine) InstallSnapshot(snapshot []byte) error {
 func (sm *MockStateMachine) CreateSnapshot() ([]byte, error) {
 	panic("todo")
 }
-
 
 type TestNetwork struct {
 	lastMessageSent        []byte

@@ -12,16 +12,13 @@ import (
 	"toy-raft/state"
 )
 
-const n = 20
-
-func main_old() {
-
-	net := network.NewPseudoAsyncNetwork(60)
+func main() {
 
 	ids := []string{"A", "B", "C"}
 	servers := make([]*server.ServerImpl, 0, 3)
 
 	for _, id := range ids {
+		net := network.NewNatsNetwork("foo", "nats://127.0.0.1:18001,nats://127.0.0.1:18002,nats://127.0.0.1:18003,nats://127.0.0.1:18004,nats://127.0.0.1:18005,")
 		sm := state.NewKeepLastBlocksStateMachine(id, n)
 		raftNode := raft.NewRaftNodeImpl(id, sm, raft.NewInMemoryStorage(), net, ids)
 		net.RegisterNode(id, raftNode)
@@ -39,8 +36,11 @@ func main_old() {
 
 	proposeTicker := time.NewTicker(800 * time.Millisecond)
 	blockCheckTicker := time.NewTicker(8 * time.Second)
+	progressCheckTicker := time.NewTicker(10 * time.Second)
 
 	blocksProposed := 0
+
+	highestBlockApplied := uint64(0)
 
 	for {
 		select {
@@ -57,8 +57,17 @@ func main_old() {
 					blocksProposed++
 				}
 			}
+		case <-progressCheckTicker.C:
+			maxApplied := uint64(0)
+			for _, server := range servers {
+				maxApplied = max(server.StateMachine.Applied(), maxApplied)
+			}
+			if maxApplied > highestBlockApplied {
+				highestBlockApplied = maxApplied
+			} else {
+				panic("no new blocks applied")
+			}
 		case <-blockCheckTicker.C:
-
 			log.Printf("🔮 Snapshotting servers")
 			serverSnapshotMap := make(map[string]checks.ServerStateSnapshot, len(servers))
 			for _, server := range servers {

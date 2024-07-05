@@ -33,11 +33,6 @@ func (s *ServerImpl) Propose(blob []byte) error {
 	return s.RaftNode.Propose(blob)
 }
 
-func (s *ServerImpl) Get() ([]byte, int) {
-	latestBlock, offset := s.StateMachine.GetTailBlocks(1)
-	return latestBlock[0], offset
-}
-
 func (s *ServerImpl) Start() {
 	fmt.Printf("Starting server %s\n", s.Id)
 	s.RaftNode.Start()
