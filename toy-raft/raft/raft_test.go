@@ -879,8 +879,6 @@ func TestHandleVoteRequest(t *testing.T) {
 		assertEqual(t, voteResponse.VoteGranted, true)
 	})
 
-	// TODO: same term already voted for someone else
-
 	t.Run("same_term_no_vote", func(t *testing.T) {
 
 		initialTerm := uint64(5)

@@ -647,47 +647,41 @@ func (rn *RaftNodeImpl) convertToCandidate() {
 // restart electionTimer for valid previousStates (Candidate|Leader)
 func (rn *RaftNodeImpl) stepdown() {
 
-	var logMsg string
-	previousState := rn.state
-
-	if previousState == Leader {
-		// guard:
-		if rn.followersStateMap == nil {
+	currentState := rn.state
+	{
+		// has followers state iff leader
+		if currentState == Leader && rn.followersStateMap == nil {
 			panic("a leader should have a followersStateMap")
+		} else if currentState != Leader && rn.followersStateMap != nil {
+			panic(fmt.Sprintf("a %s should not have a followerStateMap", currentState))
 		}
+
+		// has vote map iff candidate
+		if currentState == Candidate && rn.voteMap == nil {
+			panic("a candidate should have a vote map")
+		} else if currentState != Candidate && rn.voteMap != nil {
+			panic(fmt.Sprintf("a %s should not have a vote map", currentState))
+		}
+	}
+
+	switch currentState {
+	case Leader:
 		rn.followersStateMap = nil
 		stopAndDrainTicker(rn.sendAppendEntriesTicker)
-		logMsg = "leader stepped down, cleared followersStateMap, and stopped sendAppendEntriesTicker"
-	} else {
-		// guard:
-		if rn.followersStateMap != nil {
-			panic(fmt.Sprintf("a %s should not have a followerStateMap", previousState))
-		}
-	}
-
-	if previousState == Candidate {
-		// guard:
-		if rn.voteMap == nil {
-			panic("a candidate should have a vote map")
-		}
-		// clear vote map
+		rn.Log("leader stepped down, cleared followersStateMap, and stopped sendAppendEntriesTicker")
+		resetAndRestartTimer(rn.electionTimeoutTimer, randomTimerDuration(minElectionTimeout, maxElectionTimeout))
+	case Candidate:
 		rn.voteMap = nil
-		// stop vote response timer
 		stopAndDrainTimer(rn.voteResponseTimeoutTimer)
-		logMsg = "candidate stepped down, cleared voteMap, and stopped voteResponseTimeoutTimer"
-	} else {
-		// guard:
-		if rn.voteMap != nil {
-			panic(fmt.Sprintf("a %s should not have a vote map", previousState))
-		}
+		rn.Log("candidate stepped down, cleared voteMap, and stopped voteResponseTimeoutTimer")
+		resetAndRestartTimer(rn.electionTimeoutTimer, randomTimerDuration(minElectionTimeout, maxElectionTimeout))
+	case Follower:
+		// already follower
+	default:
+		panic(fmt.Sprintf("unknown raft state %s", currentState))
 	}
 
-	// convert to follower
 	rn.state = Follower
-	// reset election timer so we can give candidate time to resolve election
-	// BUG: should not reset timer if follower
-	resetAndDrainTimer(rn.electionTimeoutTimer, randomTimerDuration(minElectionTimeout, maxElectionTimeout))
-	rn.Log(logMsg)
 }
 
 // this method is triggered by receiving an RPC with a higher term, regardless of state
@@ -796,6 +790,10 @@ func (rn *RaftNodeImpl) entriesToSendToFollower(followerId string) []Entry {
 		return rn.storage.GetLogEntriesFrom(rn.followersStateMap[followerId].nextIndex)
 	}
 	return []Entry{}
+}
+
+func resetAndRestartTimer(t *time.Timer, resetDuration time.Duration) {
+	resetAndDrainTimer(t, resetDuration)
 }
 
 func resetAndDrainTimer(t *time.Timer, resetDuration time.Duration) {
