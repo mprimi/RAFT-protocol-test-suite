@@ -13,6 +13,7 @@ type NatsNetwork struct {
 	conn *nats.Conn
 
 	groupId          string
+	proposalSubject  string
 	broadcastSubject string
 	unicastPrefix    string
 
@@ -29,6 +30,7 @@ func NewNatsNetwork(groupId, natsUrl string) Network {
 	natsNetwork := &NatsNetwork{
 		conn:             nc,
 		groupId:          groupId,
+		proposalSubject:  fmt.Sprintf("%s.%s.proposal", NatsSubjectPrefix, groupId),
 		broadcastSubject: fmt.Sprintf("%s.%s.broadcast", NatsSubjectPrefix, groupId),
 		unicastPrefix:    fmt.Sprintf("%s.%s", NatsSubjectPrefix, groupId),
 		networkDevices:   make(map[string]NetworkDevice),
@@ -38,6 +40,16 @@ func NewNatsNetwork(groupId, natsUrl string) Network {
 }
 
 func (net *NatsNetwork) RegisterNode(id string, networkDevice NetworkDevice) {
+	// subscribe to proposals
+	{
+		_, err := net.conn.Subscribe(net.proposalSubject, func(msg *nats.Msg) {
+			// FIX: wtf
+			networkDevice.Receive([]byte(fmt.Sprintf("{\"operationType\": 4, \"payload\": \"%v\"}", msg.Data)))
+		})
+		if err != nil {
+			panic(fmt.Sprintf("failed to subscribe to proposal subject: %s", err))
+		}
+	}
 	// subscribe to unicast messages
 	{
 		recipientSubj := fmt.Sprintf("%s.%s", net.unicastPrefix, id)

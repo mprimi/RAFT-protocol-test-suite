@@ -1,78 +1,56 @@
 package main
 
 import (
-	"errors"
+	"flag"
 	"log"
-	"math/rand"
-	"time"
-	"toy-raft/checks"
+	"strings"
 	"toy-raft/network"
 	"toy-raft/raft"
 	"toy-raft/server"
 	"toy-raft/state"
+
+	"github.com/nats-io/nats.go"
 )
 
 const n = 20
 
-func main_old() {
+func main() {
+	var (
+		replicaId  string
+		groupId    string
+		natsUrl    string
+		peerString string
+	)
+	flag.StringVar(&replicaId, "replicaId", "", "unique id of replica")
+	flag.StringVar(&groupId, "groupId", "", "raft group id")
+	flag.StringVar(&natsUrl, "natsUrl", "", "nats url")
+	flag.StringVar(&peerString, "peers", "", "comma separated list of peer ids (including self)")
+	flag.Parse()
 
-	net := network.NewPseudoAsyncNetwork(60)
-
-	ids := []string{"A", "B", "C"}
-	servers := make([]*server.ServerImpl, 0, 3)
-
-	for _, id := range ids {
-		sm := state.NewKeepLastBlocksStateMachine(id, n)
-		raftNode := raft.NewRaftNodeImpl(id, sm, raft.NewInMemoryStorage(), net, ids)
-		net.RegisterNode(id, raftNode)
-		server := server.NewServer(
-			id,
-			raftNode,
-			sm,
-		)
-		servers = append(servers, server)
-		go server.Start()
+	if replicaId == "" {
+		panic("requires a valid replica id")
 	}
 
-	rng := rand.New(rand.NewSource(12345))
-	buffer := make([]byte, 10)
-
-	proposeTicker := time.NewTicker(800 * time.Millisecond)
-	blockCheckTicker := time.NewTicker(8 * time.Second)
-
-	blocksProposed := 0
-
-	for {
-		select {
-		case <-proposeTicker.C:
-			for _, server := range servers {
-				rng.Read(buffer)
-				err := server.Propose(buffer)
-				if errors.Is(err, raft.ErrNotLeader) {
-					// ignore
-				} else if err != nil {
-					panic(err)
-				} else {
-					log.Printf("👹 proposed block %d: %v\n", blocksProposed, buffer)
-					blocksProposed++
-				}
-			}
-		case <-blockCheckTicker.C:
-
-			log.Printf("🔮 Snapshotting servers")
-			serverSnapshotMap := make(map[string]checks.ServerStateSnapshot, len(servers))
-			for _, server := range servers {
-				blocks, offset := server.StateMachine.(*state.KeepLastBlocksStateMachine).GetTailBlocks(n)
-				serverSnapshotMap[server.Id] = checks.ServerStateSnapshot{
-					Blocks: blocks,
-					Offset: offset,
-				}
-			}
-
-			if err := checks.ServersConsistencyCheck(serverSnapshotMap, n); err != nil {
-				panic("Servers are not consistent: " + err.Error())
-			}
-			log.Printf("✅ Servers are consistent")
-		}
+	if groupId == "" {
+		panic("requires a valid raft group id")
 	}
+
+	if peerString == "" {
+		panic("requires a valid peer list")
+	}
+	peers := strings.Split(peerString, ",")
+
+	if natsUrl == "" {
+		log.Printf("no natsUrl was provided, using default: %s", nats.DefaultURL)
+		natsUrl = nats.DefaultURL
+	}
+
+	network := network.NewNatsNetwork(groupId, natsUrl)
+
+	sm := state.NewKeepLastBlocksStateMachine(replicaId, n)
+	raftNode := raft.NewRaftNodeImpl(replicaId, sm, raft.NewInMemoryStorage(), network, peers)
+	network.RegisterNode(replicaId, raftNode)
+	server := server.NewServer(replicaId, raftNode, sm)
+	server.Start()
+	select {}
 }
