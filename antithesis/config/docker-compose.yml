@@ -1,10 +1,8 @@
-version: '3'
-
 services:
   replica-A:
     container_name: replica-A
     hostname: replica-A
-    image: raft_node:latest
+    image: raft_sut:latest
     entrypoint: /bin/raft-replica
     command: -replicaId replica-A -groupId "test-raft" -natsUrl nats://nats-server:4222 -peers replica-A,replica-B,replica-C
     networks:
@@ -18,7 +16,7 @@ services:
   replica-B:
     container_name: replica-B
     hostname: replica-B
-    image: raft_node:latest
+    image: raft_sut:latest
     entrypoint: /bin/raft-replica
     command: -replicaId replica-B -groupId "test-raft" -natsUrl nats://nats-server:4222 -peers replica-A,replica-B,replica-C
     networks:
@@ -32,7 +30,7 @@ services:
   replica-C:
     container_name: replica-C
     hostname: replica-C
-    image: raft_node:latest
+    image: raft_sut:latest
     entrypoint: /bin/raft-replica
     command: -replicaId replica-C -groupId "test-raft" -natsUrl nats://nats-server:4222 -peers replica-A,replica-B,replica-C
     networks:
@@ -47,7 +45,7 @@ services:
   workload:
     container_name: workload
     hostname: workload
-    image: workload:latest
+    image: raft_workload:latest
     entrypoint: /bin/workload
     command: -trace -groupId "test-raft" -natsUrl nats://nats-server:4222
     networks:

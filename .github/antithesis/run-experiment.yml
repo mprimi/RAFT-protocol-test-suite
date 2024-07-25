@@ -1,0 +1,38 @@
+name: "Experiment with existing images"
+
+env:
+  ANTITHESIS_WEBOOK_TOKEN: ${{ secrets.ANTITHESIS_WEBOOK_TOKEN }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      duration:
+        description: 'Duration (fuzzing hours)'
+        required: true
+        type: string
+        default: "1.0"
+      imgtag:
+        description: 'Image'
+        required: true
+        type: string
+        default: "latest"
+      description:
+        description: 'Experiment description (avoid quotes, please!)'
+        required: true
+        type: string
+        default: "No description provided"
+      email:
+        description: 'Additional email notification recipient (separate with ;)'
+        required: false
+        type: string
+        default: ""
+
+jobs:
+  parametrized-experiment:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository (without submodules)
+        uses: actions/checkout@v4
+
+      - name: "Launch single experiment"
+        run: ./antithesis/scripts/launch_experiment.sh 'default' '${{ inputs.duration }}' '${{ inputs.imgtag }}' '${{ inputs.description }}' '${{ inputs.email }}'

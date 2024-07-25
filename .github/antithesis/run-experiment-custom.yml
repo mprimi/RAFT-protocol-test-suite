@@ -1,39 +1,47 @@
-name: "Build and publish 'latest' Images"
-
-# This workflow uses actions that are not certified by GitHub.
-# They are provided by a third-party and are governed by
-# separate terms of service, privacy policy, and support
-# documentation.
-
-on:
-  workflow_dispatch:
-  push:
-    branches: [ "main" ]
+name: "Experiment with custom-branch images"
 
 env:
+  ANTITHESIS_WEBOOK_TOKEN: ${{ secrets.ANTITHESIS_WEBOOK_TOKEN }}
   REGISTRY_URL: ${{ secrets.ANTITHESIS_REGISTRY_URL }}
   REGISTRY_REPOSITORY: ${{ secrets.ANTITHESIS_REPOSITORY }}
   REGISTRY_LOGIN: ${{ secrets.ANTITHESIS_REGISTRY_LOGIN }}
   SUT_IMAGE: raft_sut
   WORKLOAD_IMAGE: raft_workload
   CONFIG_IMAGE: raft_config
-  IMAGES_TAG: latest
+  IMAGES_TAG: custom_${{ github.triggering_actor }}_${{ github.run_number }}
   NATS_UPSTREAM_IMAGE: nats
   NATS_UPSTREAM_TAG: latest
   NATS_IMAGE: nats_server
   NATS_TAG: latest
-  GIT_TAG: antithesis/latest
+
+on:
+  workflow_dispatch:
+    inputs:
+      duration:
+        description: 'Duration (fuzzing hours)'
+        required: true
+        type: string
+        default: "1.0"
+      description:
+        description: 'Experiment description (avoid quotes, please!)'
+        required: true
+        type: string
+        default: "No description provided"
+      email:
+        description: 'Additional email notification recipient (separate with ;)'
+        required: false
+        type: string
+        default: ""
 
 jobs:
-  build:
+  build-publish-and-trigger-experiment:
     runs-on: ubuntu-latest
-    # Allow this workflow to push
-    permissions:
-      contents: write
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Populate buildinfo and version files
+        run: ./antithesis/scripts/buildinfo.sh
 
       - name: Login to Antithesis Docker Registry
         uses: docker/login-action@v3
@@ -42,11 +50,7 @@ jobs:
           username: _json_key
           password: ${REGISTRY_LOGIN}
 
-      - name: Populate buildinfo and version files
-        run: ./antithesis/scripts/buildinfo.sh
-
       - name: Build, tag SUT image
-        timeout-minutes: 100
         run: |
           docker build -f ./antithesis/system-under-test/Dockerfile -t ${SUT_IMAGE}:${IMAGES_TAG} .
           docker tag ${SUT_IMAGE}:${IMAGES_TAG} ${REGISTRY_URL}/${REGISTRY_REPOSITORY}/${SUT_IMAGE}:${IMAGES_TAG}
@@ -73,7 +77,5 @@ jobs:
           docker push ${REGISTRY_URL}/${REGISTRY_REPOSITORY}/${CONFIG_IMAGE}:${IMAGES_TAG}
           docker push ${REGISTRY_URL}/${REGISTRY_REPOSITORY}/${NATS_IMAGE}:${NATS_TAG}
 
-      - name: Update git tag tracking the latest images
-        run: |
-          git tag -f ${{ env.GIT_TAG }}
-          git push -f origin ${{ env.GIT_TAG }}
+      - name: "Launch single experiment"
+        run: ./antithesis/scripts/launch_experiment.sh 'default' '${{ inputs.duration }}' '${{ env.IMAGES_TAG }}' '${{ inputs.description }}' '${{ inputs.email }}'
