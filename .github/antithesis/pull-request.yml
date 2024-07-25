@@ -1,0 +1,30 @@
+name: "Pull Request: Build Antithesis Images"
+
+on: [pull_request]
+
+env:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    # Explicitly enable selected permissions (disables the rest by default)
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository (without submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - name: Build Antithesis images
+        run: |
+          docker build -f ./antithesis/system-under-test/Dockerfile .
+
+      - name: Build, tag workload image
+        run: |
+          docker build -f ./antithesis/workload/Dockerfile .
+
+      - name: Build tag config image
+        run: |
+          docker build -f ./antithesis/config/Dockerfile .

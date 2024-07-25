@@ -1,0 +1,79 @@
+name: "Build and publish 'latest' Images"
+
+# This workflow uses actions that are not certified by GitHub.
+# They are provided by a third-party and are governed by
+# separate terms of service, privacy policy, and support
+# documentation.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ "main" ]
+
+env:
+  REGISTRY_URL: ${{ secrets.ANTITHESIS_REGISTRY_URL }}
+  REGISTRY_REPOSITORY: ${{ secrets.ANTITHESIS_REPOSITORY }}
+  REGISTRY_LOGIN: ${{ secrets.ANTITHESIS_REGISTRY_LOGIN }}
+  SUT_IMAGE: raft_node
+  WORKLOAD_IMAGE: workload
+  CONFIG_IMAGE: config
+  IMAGES_TAG: latest
+  NATS_UPSTREAM_IMAGE: nats
+  NATS_UPSTREAM_TAG: latest
+  NATS_IMAGE: nats_server
+  NATS_TAG: latest
+  GIT_TAG: antithesis/latest
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    # Allow this workflow to push
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Login to Antithesis Docker Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${REGISTRY_URL}
+          username: _json_key
+          password: ${REGISTRY_LOGIN}
+
+      - name: Populate buildinfo and version files
+        run: ./antithesis/scripts/buildinfo.sh
+
+      - name: Build, tag SUT image
+        timeout-minutes: 100
+        run: |
+          docker build -f ./antithesis/system-under-test/Dockerfile -t ${SUT_IMAGE}:${IMAGES_TAG} .
+          docker tag ${SUT_IMAGE}:${IMAGES_TAG} ${REGISTRY_URL}/${REGISTRY_REPOSITORY}/${SUT_IMAGE}:${IMAGES_TAG}
+
+      - name: Build, tag workload image
+        run: |
+          docker build ./antithesis/workload/Dockerfile -t ${WORKLOAD_IMAGE}:${IMAGES_TAG} .
+          docker tag ${WORKLOAD_IMAGE}:${IMAGES_TAG} ${REGISTRY_URL}/${REGISTRY_REPOSITORY}/${WORKLOAD_IMAGE}:${IMAGES_TAG}
+
+      - name: Build tag config image
+        run: |
+          docker build ./antithesis/config/Dockerfile -t ${CONFIG_IMAGE}:${IMAGES_TAG} .
+          docker tag ${CONFIG_IMAGE}:${IMAGES_TAG} ${REGISTRY_URL}/${REGISTRY_REPOSITORY}/${CONFIG_IMAGE}:${IMAGES_TAG}
+
+      - name: Pull and tag upstream nats-server image
+        run: |
+          docker pull ${NATS_UPSTREAM_IMAGE}:${NATS_UPSTREAM_TAG}
+          docker tag ${NATS_UPSTREAM_IMAGE}:${NATS_UPSTREAM_TAG} ${REGISTRY_URL}/${REGISTRY_REPOSITORY}/${NATS_IMAGE}:${NATS_TAG}
+
+      - name: Publish images
+        run: |
+          docker push ${REGISTRY_URL}/${REGISTRY_REPOSITORY}/${SUT_IMAGE}:${IMAGES_TAG}
+          docker push ${REGISTRY_URL}/${REGISTRY_REPOSITORY}/${WORKLOAD_IMAGE}:${IMAGES_TAG}
+          docker push ${REGISTRY_URL}/${REGISTRY_REPOSITORY}/${CONFIG_IMAGE}:${IMAGES_TAG}
+          docker push ${REGISTRY_URL}/${REGISTRY_REPOSITORY}/${NATS_IMAGE}:${NATS_TAG}
+
+      - name: Update git tag tracking the latest images
+        run: |
+          git tag -f ${{ env.GIT_TAG }}
+          git push -f origin ${{ env.GIT_TAG }}

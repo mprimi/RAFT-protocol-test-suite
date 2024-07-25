@@ -1,0 +1,73 @@
+version: '3'
+
+services:
+  replica-A:
+    container_name: replica-A
+    hostname: replica-A
+    image: raft_node:latest
+    entrypoint: /bin/raft-replica
+    command: -replicaId replica-A -groupId "test-raft" -natsUrl nats://nats-server:4222 -peers replica-A,replica-B,replica-C
+    networks:
+      antithesis-net:
+        ipv4_address: 10.20.20.2
+    deploy:
+      resources:
+        limits:
+          cpus: ${CPU_LIMIT}
+          memory: ${MEM_LIMIT}
+  replica-B:
+    container_name: replica-B
+    hostname: replica-B
+    image: raft_node:latest
+    entrypoint: /bin/raft-replica
+    command: -replicaId replica-B -groupId "test-raft" -natsUrl nats://nats-server:4222 -peers replica-A,replica-B,replica-C
+    networks:
+      antithesis-net:
+        ipv4_address: 10.20.20.3
+    deploy:
+      resources:
+        limits:
+          cpus: ${CPU_LIMIT}
+          memory: ${MEM_LIMIT}
+  replica-C:
+    container_name: replica-C
+    hostname: replica-C
+    image: raft_node:latest
+    entrypoint: /bin/raft-replica
+    command: -replicaId replica-C -groupId "test-raft" -natsUrl nats://nats-server:4222 -peers replica-A,replica-B,replica-C
+    networks:
+      antithesis-net:
+        ipv4_address: 10.20.20.4
+    deploy:
+      resources:
+        limits:
+          cpus: ${CPU_LIMIT}
+          memory: ${MEM_LIMIT}
+
+  workload:
+    container_name: workload
+    hostname: workload
+    image: workload:latest
+    entrypoint: /bin/workload
+    command: -trace -groupId "test-raft" -natsUrl nats://nats-server:4222
+    networks:
+      antithesis-net:
+        ipv4_address: 10.20.20.130
+
+  nats-server:
+    container_name: nats-server
+    hostname: nats-server
+    image: nats_server:latest
+    command: --port 4222
+    ports:
+      - "4222:4222"
+    networks:
+      antithesis-net:
+        ipv4_address: 10.20.20.150
+
+networks:
+  antithesis-net:
+    driver: bridge
+    ipam:
+      config:
+      - subnet: 10.20.20.0/24
