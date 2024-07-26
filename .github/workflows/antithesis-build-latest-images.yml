@@ -11,9 +11,9 @@ on:
     branches: [ "main" ]
 
 env:
-  REGISTRY_URL: ${{ secrets.ANTITHESIS_REGISTRY_URL }}
+  # REGISTRY_URL: ${{ secrets.ANTITHESIS_REGISTRY_URL }}
   REGISTRY_REPOSITORY: ${{ secrets.ANTITHESIS_REPOSITORY }}
-  REGISTRY_LOGIN: ${{ secrets.ANTITHESIS_REGISTRY_LOGIN }}
+  # REGISTRY_LOGIN: ${{ secrets.ANTITHESIS_REGISTRY_LOGIN }}
   SUT_IMAGE: raft_sut
   WORKLOAD_IMAGE: raft_workload
   CONFIG_IMAGE: raft_config
@@ -40,7 +40,7 @@ jobs:
         with:
           registry: ${{ secrets.ANTITHESIS_REGISTRY_URL }}
           username: _json_key
-          password: ${REGISTRY_LOGIN}
+          password: ${{ secrets.ANTITHESIS_REGISTRY_LOGIN }}
 
       - name: Populate buildinfo and version files
         run: ./antithesis/scripts/buildinfo.sh
