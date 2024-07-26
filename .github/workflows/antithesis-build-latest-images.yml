@@ -12,7 +12,7 @@ on:
 
 env:
   # REGISTRY_URL: ${{ secrets.ANTITHESIS_REGISTRY_URL }}
-  REGISTRY_REPOSITORY: ${{ secrets.ANTITHESIS_REPOSITORY }}
+  # REGISTRY_REPOSITORY: ${{ secrets.ANTITHESIS_REPOSITORY }}
   # REGISTRY_LOGIN: ${{ secrets.ANTITHESIS_REGISTRY_LOGIN }}
   SUT_IMAGE: raft_sut
   WORKLOAD_IMAGE: raft_workload
@@ -49,29 +49,29 @@ jobs:
         timeout-minutes: 100
         run: |
           docker build -f ./antithesis/system-under-test/Dockerfile -t ${SUT_IMAGE}:${IMAGES_TAG} .
-          docker tag ${SUT_IMAGE}:${IMAGES_TAG} ${REGISTRY_URL}/${REGISTRY_REPOSITORY}/${SUT_IMAGE}:${IMAGES_TAG}
+          docker tag ${SUT_IMAGE}:${IMAGES_TAG} ${REGISTRY_URL}/${{ secrets.ANTITHESIS_REPOSITORY }}/${SUT_IMAGE}:${IMAGES_TAG}
 
       - name: Build, tag workload image
         run: |
           docker build ./antithesis/workload/Dockerfile -t ${WORKLOAD_IMAGE}:${IMAGES_TAG} .
-          docker tag ${WORKLOAD_IMAGE}:${IMAGES_TAG} ${REGISTRY_URL}/${REGISTRY_REPOSITORY}/${WORKLOAD_IMAGE}:${IMAGES_TAG}
+          docker tag ${WORKLOAD_IMAGE}:${IMAGES_TAG} ${REGISTRY_URL}/${{ secrets.ANTITHESIS_REPOSITORY }}/${WORKLOAD_IMAGE}:${IMAGES_TAG}
 
       - name: Build tag config image
         run: |
           docker build ./antithesis/config/Dockerfile -t ${CONFIG_IMAGE}:${IMAGES_TAG} .
-          docker tag ${CONFIG_IMAGE}:${IMAGES_TAG} ${REGISTRY_URL}/${REGISTRY_REPOSITORY}/${CONFIG_IMAGE}:${IMAGES_TAG}
+          docker tag ${CONFIG_IMAGE}:${IMAGES_TAG} ${REGISTRY_URL}/${{ secrets.ANTITHESIS_REPOSITORY }}/${CONFIG_IMAGE}:${IMAGES_TAG}
 
       - name: Pull and tag upstream nats-server image
         run: |
           docker pull ${NATS_UPSTREAM_IMAGE}:${NATS_UPSTREAM_TAG}
-          docker tag ${NATS_UPSTREAM_IMAGE}:${NATS_UPSTREAM_TAG} ${REGISTRY_URL}/${REGISTRY_REPOSITORY}/${NATS_IMAGE}:${NATS_TAG}
+          docker tag ${NATS_UPSTREAM_IMAGE}:${NATS_UPSTREAM_TAG} ${REGISTRY_URL}/${{ secrets.ANTITHESIS_REPOSITORY }}/${NATS_IMAGE}:${NATS_TAG}
 
       - name: Publish images
         run: |
-          docker push ${REGISTRY_URL}/${REGISTRY_REPOSITORY}/${SUT_IMAGE}:${IMAGES_TAG}
-          docker push ${REGISTRY_URL}/${REGISTRY_REPOSITORY}/${WORKLOAD_IMAGE}:${IMAGES_TAG}
-          docker push ${REGISTRY_URL}/${REGISTRY_REPOSITORY}/${CONFIG_IMAGE}:${IMAGES_TAG}
-          docker push ${REGISTRY_URL}/${REGISTRY_REPOSITORY}/${NATS_IMAGE}:${NATS_TAG}
+          docker push ${REGISTRY_URL}/${{ secrets.ANTITHESIS_REPOSITORY }}/${SUT_IMAGE}:${IMAGES_TAG}
+          docker push ${REGISTRY_URL}/${{ secrets.ANTITHESIS_REPOSITORY }}/${WORKLOAD_IMAGE}:${IMAGES_TAG}
+          docker push ${REGISTRY_URL}/${{ secrets.ANTITHESIS_REPOSITORY }}/${CONFIG_IMAGE}:${IMAGES_TAG}
+          docker push ${REGISTRY_URL}/${{ secrets.ANTITHESIS_REPOSITORY }}/${NATS_IMAGE}:${NATS_TAG}
 
       - name: Update git tag tracking the latest images
         run: |
