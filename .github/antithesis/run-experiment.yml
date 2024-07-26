@@ -2,6 +2,7 @@ name: "Experiment with existing images"
 
 env:
   ANTITHESIS_WEBOOK_TOKEN: ${{ secrets.ANTITHESIS_WEBOOK_TOKEN }}
+  ANTITHESIS_WEBOOK_URL: ${{ secrets.ANTITHESIS_WEBOOK_URL }}
 
 on:
   workflow_dispatch:

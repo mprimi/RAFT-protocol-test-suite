@@ -31,7 +31,13 @@ for cmd in ${REQUIRED}; do
 done
 
 # Ensure token is set in environment
-if [ -z "$ANTITHESIS_WEBOOK_TOKEN" ]; then
+if [ -z "${ANTITHESIS_WEBOOK_TOKEN}" ]; then
+    echo "Environment variable ANTITHESIS_WEBOOK_TOKEN is not set."
+    exit 1
+fi
+
+# Ensure URL is set in environment
+if [ -z "${ANTITHESIS_WEBOOK_URL}" ]; then
     echo "Environment variable ANTITHESIS_WEBOOK_TOKEN is not set."
     exit 1
 fi
