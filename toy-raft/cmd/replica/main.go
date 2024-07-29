@@ -1,9 +1,12 @@
 package main
 
 import (
+	"errors"
 	"flag"
+	"fmt"
 	"log"
 	"strings"
+	"time"
 	"toy-raft/network"
 	"toy-raft/raft"
 	"toy-raft/server"
@@ -52,5 +55,22 @@ func main() {
 	network.RegisterNode(replicaId, raftNode)
 	server := server.NewServer(replicaId, raftNode, sm)
 	server.Start()
-	select {}
+
+	proposalCount := 0
+
+	for {
+		select {
+		case <-time.After(1 * time.Second):
+			if err := server.Propose([]byte{}); err != nil {
+				if errors.Is(err, raft.ErrNotLeader) {
+					continue
+				}
+				panic(err)
+			}
+			proposalCount++
+
+		case <-time.After(10 * time.Second):
+			fmt.Printf("proposalCount: %d\n", proposalCount)
+		}
+	}
 }

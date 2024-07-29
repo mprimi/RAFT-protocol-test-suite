@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"math/rand"
+	"sync/atomic"
 	"time"
 	"toy-raft/network"
 	"toy-raft/state"
@@ -13,6 +14,7 @@ import (
 
 const (
 	updateChannelBufferSz          int           = 10000
+	proposalQueueBufferSz          int           = 100
 	heartbeatInterval              time.Duration = 1 * time.Second
 	aeResponseTimeoutDuration      time.Duration = 200 * time.Millisecond
 	voteResponseTimeoutDuration    time.Duration = 3 * time.Second
@@ -42,6 +44,8 @@ type RaftNodeImpl struct {
 	// set of peers including self
 	peers map[string]bool
 
+	acceptingProposals atomic.Bool
+
 	// Follower
 	electionTimeoutTimer *time.Timer
 
@@ -52,6 +56,7 @@ type RaftNodeImpl struct {
 	// Leader only
 	followersStateMap       map[string]*FollowerState
 	sendAppendEntriesTicker *time.Ticker
+	inboundProposals        chan []byte
 
 	// All servers
 	// index of highest log entry known to be committed
@@ -66,16 +71,17 @@ func NewRaftNodeImpl(id string, sm state.StateMachine, storage Storage, network 
 		peersMap[peer] = true
 	}
 	return &RaftNodeImpl{
-		id:              id,
-		storage:         storage,
-		stateMachine:    sm,
-		network:         network,
-		quitCh:          make(chan bool),
-		inboundMessages: make(chan []byte, updateChannelBufferSz),
-		peers:           peersMap,
-		state:           Follower,
-		commitIndex:     0,
-		lastApplied:     0,
+		id:               id,
+		storage:          storage,
+		stateMachine:     sm,
+		network:          network,
+		quitCh:           make(chan bool),
+		inboundMessages:  make(chan []byte, updateChannelBufferSz),
+		inboundProposals: make(chan []byte, proposalQueueBufferSz),
+		peers:            peersMap,
+		state:            Follower,
+		commitIndex:      0,
+		lastApplied:      0,
 	}
 }
 
@@ -138,6 +144,21 @@ func (rn *RaftNodeImpl) processOneTransistionInternal(inactivityTimeout time.Dur
 	currentTerm := rn.storage.GetCurrentTerm()
 
 	select {
+	case proposal := <-rn.inboundProposals:
+		// consume proposal
+		if rn.state == Leader {
+			msgCopy := make([]byte, len(proposal))
+			// encode
+			entry := Entry{
+				Term: rn.storage.GetCurrentTerm(),
+				Cmd:  msgCopy,
+			}
+			if err := rn.storage.AppendEntry(entry); err != nil {
+				panic(err)
+			}
+		} else {
+			rn.Log("ignoring proposal since we are not leader")
+		}
 	case inboundMessage := <-rn.inboundMessages:
 		// handle the new message from network
 		opType, message, err := parseMessage(inboundMessage)
@@ -589,6 +610,14 @@ func (rn *RaftNodeImpl) ascendToLeader() {
 		}
 	}
 
+	swapped := rn.acceptingProposals.CompareAndSwap(false, true)
+	// guard:
+	if !swapped {
+		panic("unexpectedly was accepting proposals")
+	}
+
+	// leader state is initialized
+
 	// find term for last log entry, if no entries exist then 0
 	var prevLogTerm uint64 = 0
 	prevLogIdx := rn.storage.GetLastLogIndex()
@@ -684,6 +713,11 @@ func (rn *RaftNodeImpl) stepdown() {
 		stopAndDrainTicker(rn.sendAppendEntriesTicker)
 		rn.Log("leader stepped down, cleared followersStateMap, and stopped sendAppendEntriesTicker")
 		resetAndRestartTimer(rn.electionTimeoutTimer, randomTimerDuration(minElectionTimeout, maxElectionTimeout))
+		swapped := rn.acceptingProposals.CompareAndSwap(true, false)
+		// guard:
+		if !swapped {
+			panic("unexpectedly was not accepting proposals")
+		}
 	case Candidate:
 		rn.voteMap = nil
 		stopAndDrainTimer(rn.voteResponseTimeoutTimer)
@@ -755,20 +789,14 @@ func (rn *RaftNodeImpl) Log(format string, args ...any) {
 var ErrNotLeader = fmt.Errorf("not leader")
 
 func (rn *RaftNodeImpl) Propose(msg []byte) error {
-	if rn.state == Leader {
-		msgCopy := make([]byte, len(msg))
-		copy(msgCopy, msg)
-		// encode
-		entry := Entry{
-			Term: rn.storage.GetCurrentTerm(),
-			Cmd:  msgCopy,
+	// HACK:this way of accepting proposals might have false positives/negatives
+	if rn.acceptingProposals.Load() {
+		var proposal []byte
+		bytesCopied := copy(proposal, msg)
+		if len(msg) != bytesCopied {
+			panic("failed to copy buffer")
 		}
-		if err := rn.storage.AppendEntry(entry); err != nil {
-			panic(err)
-		}
-	} else {
-		// TODO: if follower, route to leader
-		return ErrNotLeader
+		rn.inboundProposals <- msg
 	}
 	return nil
 }

@@ -40,16 +40,6 @@ func NewNatsNetwork(groupId, natsUrl string) Network {
 }
 
 func (net *NatsNetwork) RegisterNode(id string, networkDevice NetworkDevice) {
-	// subscribe to proposals
-	{
-		_, err := net.conn.Subscribe(net.proposalSubject, func(msg *nats.Msg) {
-			// FIX: wtf
-			networkDevice.Receive([]byte(fmt.Sprintf("{\"operationType\": 4, \"payload\": \"%v\"}", msg.Data)))
-		})
-		if err != nil {
-			panic(fmt.Sprintf("failed to subscribe to proposal subject: %s", err))
-		}
-	}
 	// subscribe to unicast messages
 	{
 		recipientSubj := fmt.Sprintf("%s.%s", net.unicastPrefix, id)
