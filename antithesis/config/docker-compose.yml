@@ -1,0 +1,87 @@
+services:
+  replica-A:
+    container_name: replica-A
+    hostname: replica-A
+    image: raft_sut:latest
+    entrypoint: /bin/raft-replica
+    command: -replica-id replica-A -group-id "test-raft" -nats-url nats://nats-server:4222 -peers replica-A,replica-B,replica-C
+    networks:
+      antithesis-net:
+        ipv4_address: 10.20.20.2
+    deploy:
+      resources:
+        limits:
+          cpus: ${CPU_LIMIT}
+          memory: ${MEM_LIMIT}
+    depends_on:
+      nats-server:
+        condition: service_started
+        restart: false
+  replica-B:
+    container_name: replica-B
+    hostname: replica-B
+    image: raft_sut:latest
+    entrypoint: /bin/raft-replica
+    command: -replica-id replica-B -group-id "test-raft" -nats-url nats://nats-server:4222 -peers replica-A,replica-B,replica-C
+    networks:
+      antithesis-net:
+        ipv4_address: 10.20.20.3
+    deploy:
+      resources:
+        limits:
+          cpus: ${CPU_LIMIT}
+          memory: ${MEM_LIMIT}
+    depends_on:
+      nats-server:
+        condition: service_started
+        restart: false
+  replica-C:
+    container_name: replica-C
+    hostname: replica-C
+    image: raft_sut:latest
+    entrypoint: /bin/raft-replica
+    command: -replica-id replica-C -group-id "test-raft" -nats-url nats://nats-server:4222 -peers replica-A,replica-B,replica-C
+    networks:
+      antithesis-net:
+        ipv4_address: 10.20.20.4
+    deploy:
+      resources:
+        limits:
+          cpus: ${CPU_LIMIT}
+          memory: ${MEM_LIMIT}
+    depends_on:
+       nats-server:
+        condition: service_started
+        restart: false
+
+  workload:
+    container_name: workload
+    hostname: workload
+    image: raft_workload:latest
+    entrypoint: /bin/workload
+    command: -group-id "test-raft" -nats-url nats://nats-server:4222
+    networks:
+      antithesis-net:
+        ipv4_address: 10.20.20.130
+    depends_on:
+      nats-server:
+        condition: service_started
+        restart: false
+
+  nats-server:
+    container_name: nats-server
+    hostname: nats-server
+    image: nats_server:latest
+    command: --port 4222
+    ports:
+      - "4222:4222"
+    networks:
+      antithesis-net:
+        ipv4_address: 10.20.20.150
+
+networks:
+  antithesis-net:
+    driver: bridge
+    ipam:
+      config:
+      - subnet: 10.20.20.0/24

@@ -1,0 +1,80 @@
+name: "Experiment with custom-branch images"
+
+env:
+  ANTITHESIS_WEBOOK_TOKEN: ${{ secrets.ANTITHESIS_WEBOOK_TOKEN }}
+  ANTITHESIS_WEBOOK_URL: ${{ secrets.ANTITHESIS_WEBOOK_URL }}
+  ANTITHESIS_WEBOOK_USERNAME: ${{ secrets.ANTITHESIS_WEBOOK_USERNAME }}
+  SUT_IMAGE: raft_sut
+  WORKLOAD_IMAGE: raft_workload
+  CONFIG_IMAGE: raft_config
+  IMAGES_TAG: custom_${{ github.triggering_actor }}_${{ github.run_number }}
+  NATS_UPSTREAM_IMAGE: nats
+  NATS_UPSTREAM_TAG: latest
+  NATS_IMAGE: nats_server
+  NATS_TAG: latest
+
+on:
+  workflow_dispatch:
+    inputs:
+      duration:
+        description: 'Duration (fuzzing hours)'
+        required: true
+        type: string
+        default: "1.0"
+      description:
+        description: 'Experiment description (avoid quotes, please!)'
+        required: true
+        type: string
+        default: "No description provided"
+      email:
+        description: 'Additional email notification recipient (separate with ;)'
+        required: false
+        type: string
+        default: ""
+
+jobs:
+  build-publish-and-trigger-experiment:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Populate buildinfo and version files
+        run: ./antithesis/scripts/buildinfo.sh
+
+      - name: Login to Antithesis Docker Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ secrets.ANTITHESIS_REGISTRY_URL }}
+          username: _json_key
+          password: ${{ secrets.ANTITHESIS_REGISTRY_LOGIN }}
+
+      - name: Build, tag SUT image
+        run: |
+          docker build -f ./antithesis/system-under-test/Dockerfile -t ${SUT_IMAGE}:${IMAGES_TAG} .
+          docker tag ${SUT_IMAGE}:${IMAGES_TAG} ${{ secrets.ANTITHESIS_REGISTRY_URL }}/${{ secrets.ANTITHESIS_REPOSITORY }}/${SUT_IMAGE}:${IMAGES_TAG}
+
+      - name: Build, tag workload image
+        run: |
+          docker build -f ./antithesis/workload/Dockerfile -t ${WORKLOAD_IMAGE}:${IMAGES_TAG} .
+          docker tag ${WORKLOAD_IMAGE}:${IMAGES_TAG} ${{ secrets.ANTITHESIS_REGISTRY_URL }}/${{ secrets.ANTITHESIS_REPOSITORY }}/${WORKLOAD_IMAGE}:${IMAGES_TAG}
+
+      - name: Build tag config image
+        run: |
+          docker build -f ./antithesis/config/Dockerfile -t ${CONFIG_IMAGE}:${IMAGES_TAG} .
+          docker tag ${CONFIG_IMAGE}:${IMAGES_TAG} ${{ secrets.ANTITHESIS_REGISTRY_URL }}/${{ secrets.ANTITHESIS_REPOSITORY }}/${CONFIG_IMAGE}:${IMAGES_TAG}
+
+      - name: Pull and tag upstream nats-server image
+        run: |
+          docker pull ${NATS_UPSTREAM_IMAGE}:${NATS_UPSTREAM_TAG}
+          docker tag ${NATS_UPSTREAM_IMAGE}:${NATS_UPSTREAM_TAG} ${{ secrets.ANTITHESIS_REGISTRY_URL }}/${{ secrets.ANTITHESIS_REPOSITORY }}/${NATS_IMAGE}:${NATS_TAG}
+
+      - name: Publish images
+        run: |
+          docker push ${{ secrets.ANTITHESIS_REGISTRY_URL }}/${{ secrets.ANTITHESIS_REPOSITORY }}/${SUT_IMAGE}:${IMAGES_TAG}
+          docker push ${{ secrets.ANTITHESIS_REGISTRY_URL }}/${{ secrets.ANTITHESIS_REPOSITORY }}/${WORKLOAD_IMAGE}:${IMAGES_TAG}
+          docker push ${{ secrets.ANTITHESIS_REGISTRY_URL }}/${{ secrets.ANTITHESIS_REPOSITORY }}/${CONFIG_IMAGE}:${IMAGES_TAG}
+          docker push ${{ secrets.ANTITHESIS_REGISTRY_URL }}/${{ secrets.ANTITHESIS_REPOSITORY }}/${NATS_IMAGE}:${NATS_TAG}
+
+      - name: "Launch single experiment"
+        run: ./antithesis/scripts/launch_experiment.sh 'default' '${{ inputs.duration }}' '${{ env.IMAGES_TAG }}' '${{ inputs.description }}' '${{ inputs.email }}'

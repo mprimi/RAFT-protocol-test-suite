@@ -1,0 +1,22 @@
+name: "Pull Request: Build Antithesis Images"
+
+on: [pull_request]
+
+env:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    # Explicitly enable selected permissions (disables the rest by default)
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository (without submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - name: Build Antithesis images
+        run: |
+          make -C ./antithesis build

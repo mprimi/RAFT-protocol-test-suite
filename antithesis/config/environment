@@ -1,0 +1,6 @@
+# Soft-limit Go runtime memory
+GOMEMLIMIT=512MiB
+
+# Hard limits on server containers resources
+MEM_LIMIT=2G
+CPU_LIMIT=1.0
