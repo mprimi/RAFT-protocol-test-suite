@@ -20,11 +20,14 @@ type NatsNetwork struct {
 	networkDevices map[string]NetworkDevice
 }
 
-func NewNatsNetwork(groupId, natsUrl string) Network {
+func NewNatsNetwork(groupId, natsUrl string) (Network, error) {
 
-	nc, err := nats.Connect(natsUrl)
+	nc, err := nats.Connect(
+		natsUrl,
+		nats.MaxReconnects(-1),
+	)
 	if err != nil {
-		panic("todo")
+		return nil, fmt.Errorf("failed to connect: %w", err)
 	}
 
 	natsNetwork := &NatsNetwork{
@@ -36,7 +39,7 @@ func NewNatsNetwork(groupId, natsUrl string) Network {
 		networkDevices:   make(map[string]NetworkDevice),
 	}
 
-	return natsNetwork
+	return natsNetwork, nil
 }
 
 func (net *NatsNetwork) RegisterNode(id string, networkDevice NetworkDevice) {

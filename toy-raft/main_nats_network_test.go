@@ -18,7 +18,10 @@ func TestRaftWithNatsNetwork() {
 	servers := make([]*server.ServerImpl, 0, 3)
 
 	for _, id := range ids {
-		net := network.NewNatsNetwork("foo", "nats://127.0.0.1:18001,nats://127.0.0.1:18002,nats://127.0.0.1:18003,nats://127.0.0.1:18004,nats://127.0.0.1:18005,")
+		net, err := network.NewNatsNetwork("foo", "nats://127.0.0.1:18001,nats://127.0.0.1:18002,nats://127.0.0.1:18003,nats://127.0.0.1:18004,nats://127.0.0.1:18005,")
+		if err != nil {
+			panic(err)
+		}
 		sm := state.NewKeepLastBlocksStateMachine(id, n)
 		raftNode := raft.NewRaftNodeImpl(id, sm, raft.NewInMemoryStorage(), net, ids)
 		net.RegisterNode(id, raftNode)

@@ -1,21 +1,19 @@
 package main
 
 import (
-	"errors"
 	"flag"
 	"fmt"
-	"log"
+	"os"
+	"slices"
 	"strings"
-	"time"
+
+	"github.com/nats-io/nats.go"
+
 	"toy-raft/network"
 	"toy-raft/raft"
 	"toy-raft/server"
 	"toy-raft/state"
-
-	"github.com/nats-io/nats.go"
 )
-
-const n = 20
 
 func main() {
 	var (
@@ -24,53 +22,44 @@ func main() {
 		natsUrl    string
 		peerString string
 	)
-	flag.StringVar(&replicaId, "replicaId", "", "unique id of replica")
-	flag.StringVar(&groupId, "groupId", "", "raft group id")
-	flag.StringVar(&natsUrl, "natsUrl", "", "nats url")
+	flag.StringVar(&replicaId, "replica-id", "", "unique id of replica")
+	flag.StringVar(&groupId, "group-id", "", "raft group id")
+	flag.StringVar(&natsUrl, "nats-url", nats.DefaultURL, "nats url")
 	flag.StringVar(&peerString, "peers", "", "comma separated list of peer ids (including self)")
 	flag.Parse()
 
+	fatalErr := func(err error) {
+		fmt.Println(err)
+		os.Exit(1)
+	}
 	if replicaId == "" {
-		panic("requires a valid replica id")
+		fatalErr(fmt.Errorf("missing required argument: replica-id"))
 	}
 
 	if groupId == "" {
-		panic("requires a valid raft group id")
+		fatalErr(fmt.Errorf("missing required argument: group-id"))
 	}
 
 	if peerString == "" {
-		panic("requires a valid peer list")
+		fatalErr(fmt.Errorf("missing required argument: peers"))
 	}
 	peers := strings.Split(peerString, ",")
 
-	if natsUrl == "" {
-		log.Printf("no natsUrl was provided, using default: %s", nats.DefaultURL)
-		natsUrl = nats.DefaultURL
+	if !slices.Contains(peers, replicaId) {
+		fatalErr(fmt.Errorf("list of peers does not include this replica"))
 	}
 
-	network := network.NewNatsNetwork(groupId, natsUrl)
-
-	sm := state.NewKeepLastBlocksStateMachine(replicaId, n)
-	raftNode := raft.NewRaftNodeImpl(replicaId, sm, raft.NewInMemoryStorage(), network, peers)
-	network.RegisterNode(replicaId, raftNode)
-	server := server.NewServer(replicaId, raftNode, sm)
-	server.Start()
-
-	proposalCount := 0
-
-	for {
-		select {
-		case <-time.After(1 * time.Second):
-			if err := server.Propose([]byte{}); err != nil {
-				if errors.Is(err, raft.ErrNotLeader) {
-					continue
-				}
-				panic(err)
-			}
-			proposalCount++
-
-		case <-time.After(10 * time.Second):
-			fmt.Printf("proposalCount: %d\n", proposalCount)
-		}
+	natsNetwork, err := network.NewNatsNetwork(groupId, natsUrl)
+	if err != nil {
+		fatalErr(fmt.Errorf("failed to initialize network: %w", err))
 	}
+
+	sm := state.NewKeepLastBlocksStateMachine(replicaId, 10)
+	raftNode := raft.NewRaftNodeImpl(replicaId, sm, raft.NewInMemoryStorage(), natsNetwork, peers)
+	natsNetwork.RegisterNode(replicaId, raftNode)
+	srv := server.NewServer(replicaId, raftNode, sm)
+	srv.Start()
+
+	// Block forever
+	select {}
 }
