@@ -451,7 +451,8 @@ func (rn *RaftNodeImpl) processOneTransistionInternal(inactivityTimeout time.Dur
 			}
 
 			// do not reset timer for useless vote requests
-			if voteGranted {
+			// timer will only be running if we are a follower
+			if voteGranted && rn.state == Follower {
 				resetAndDrainTimer(rn.electionTimeoutTimer, randomTimerDuration(minElectionTimeout, maxElectionTimeout))
 			}
 
