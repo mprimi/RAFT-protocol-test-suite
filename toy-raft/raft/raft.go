@@ -6,8 +6,12 @@ import (
 	"fmt"
 	"log"
 	"math/rand"
+	"strings"
 	"sync/atomic"
 	"time"
+
+	"golang.org/x/exp/maps"
+
 	"toy-raft/network"
 	"toy-raft/state"
 )
@@ -166,6 +170,9 @@ func (rn *RaftNodeImpl) processOneTransistionInternal(inactivityTimeout time.Dur
 			rn.Log("bad message: %s", err)
 			return
 		}
+
+		// Print internal node state and details of inbound request
+		rn.LogState("Processing %s", messageToString(opType, message))
 
 		switch opType {
 		case ProposalRequestOp:
@@ -527,6 +534,7 @@ func (rn *RaftNodeImpl) processOneTransistionInternal(inactivityTimeout time.Dur
 		if rn.state != Candidate {
 			panic(fmt.Sprintf("vote response timeout while in state %s", rn.state))
 		}
+		rn.Log("election timeout, restarting campaign")
 		rn.convertToCandidate()
 
 	case <-rn.sendAppendEntriesTicker.C:
@@ -534,6 +542,7 @@ func (rn *RaftNodeImpl) processOneTransistionInternal(inactivityTimeout time.Dur
 		if rn.state != Leader {
 			panic(fmt.Sprintf("send append entries ticker fired in state %s", rn.state))
 		}
+
 		for followerId, followerState := range rn.followersStateMap {
 			var d time.Duration
 			var aeReqType string
@@ -641,11 +650,7 @@ func (rn *RaftNodeImpl) ascendToLeader() {
 		PrevLogTerm:     prevLogTerm,
 		LeaderCommitIdx: rn.commitIndex,
 	}
-	envelope := Envelope{
-		OperationType: AppendEntriesRequestOp,
-		Payload:       newLeaderAEReq.Bytes(),
-	}
-	rn.network.Broadcast(envelope.Bytes())
+	rn.BroadcastMessage(newLeaderAEReq)
 	rn.Log("broadcasted first AE requests, after becoming Leader, to followers")
 
 	for _, followerState := range rn.followersStateMap {
@@ -742,25 +747,13 @@ func (rn *RaftNodeImpl) stepdownDueToHigherTerm(term uint64) {
 func (rn *RaftNodeImpl) requestVotes(term uint64, candidateId string) {
 
 	lastLogIndex, lastLogEntryTerm := rn.storage.GetLastLogIndexAndTerm()
-	voteRequest := VoteRequest{
+	voteRequest := &VoteRequest{
 		Term:         term,
 		CandidateId:  candidateId,
 		LastLogIndex: lastLogIndex,
 		LastLogTerm:  lastLogEntryTerm,
 	}
-	voteRequestBytes, err := json.Marshal(voteRequest)
-	if err != nil {
-		panic(err)
-	}
-	envelope := Envelope{
-		OperationType: VoteRequestOp,
-		Payload:       voteRequestBytes,
-	}
-	envelopeBytes, err := json.Marshal(envelope)
-	if err != nil {
-		panic(err)
-	}
-	rn.network.Broadcast(envelopeBytes)
+	rn.BroadcastMessage(voteRequest)
 }
 
 func (rn *RaftNodeImpl) applyUpdate(update *Entry) {
@@ -773,18 +766,60 @@ func (rn *RaftNodeImpl) Stop() {
 
 func (rn *RaftNodeImpl) Log(format string, args ...any) {
 
-	var icon string
-	switch rn.state {
-	case Leader:
-		icon = "👑"
-	case Candidate:
-		icon = "🗳️"
-	default:
-		icon = "🪵"
+	stateIcon := func() string {
+		switch rn.state {
+		case Leader:
+			return "👑 LEAD"
+		case Candidate:
+			return "🗳️ CAND"
+		case Follower:
+			return "🪵 FOLL"
+		default:
+			panic(fmt.Errorf("unknown raft state %s", rn.state))
+		}
 	}
 
-	header := fmt.Sprintf("%s RAFT-%s (%s term:%d lastLogIdx:%d commit:%d applied:%d): ", icon, rn.id, rn.state, rn.storage.GetCurrentTerm(), rn.storage.GetLastLogIndex(), rn.commitIndex, rn.lastApplied)
+	header := fmt.Sprintf(
+		"[RAFT %s] [%s - %s - T:%d LLI:%d C:%d A:%d] ",
+		"?", //TODO Add group name
+		rn.id,
+		stateIcon(),
+		rn.storage.GetCurrentTerm(),
+		rn.storage.GetLastLogIndex(),
+		rn.commitIndex,
+		rn.lastApplied,
+	)
 	log.Printf(header+format+"\n", args...)
+}
+
+func (rn *RaftNodeImpl) LogState(format string, args ...any) {
+
+	b := strings.Builder{}
+	b.WriteString("{")
+	b.WriteString(fmt.Sprintf(" peers: %v", maps.Keys(rn.peers)))
+	switch rn.state {
+	case Follower:
+	case Candidate:
+		b.WriteString(fmt.Sprintf(" votes: %v", maps.Keys(rn.voteMap)))
+	case Leader:
+		b.WriteString(" followers: [")
+		for followerName, followerState := range rn.followersStateMap {
+			b.WriteString(" " + followerName + ":{")
+			b.WriteString(fmt.Sprintf(" NI:%d", followerState.nextIndex))
+			b.WriteString(fmt.Sprintf(" MI:%d", followerState.matchIndex))
+			b.WriteString(fmt.Sprintf(" AE:%s", time.Since(followerState.aeTimestamp).Round(time.Millisecond)))
+			if followerState.waitingForAEResponse {
+				b.WriteString("***")
+			}
+			b.WriteString("}")
+		}
+		b.WriteString(" ]")
+	default:
+		panic(fmt.Errorf("unknown raft state %s", rn.state))
+	}
+	b.WriteString(" } ")
+
+	rn.Log(b.String()+format, args...)
 }
 
 var ErrNotLeader = fmt.Errorf("not leader")
@@ -806,13 +841,13 @@ func (rn *RaftNodeImpl) Receive(msg []byte) {
 	rn.inboundMessages <- msg
 }
 
-func (rn *RaftNodeImpl) BroadcastToCluster(msg RaftOperation) {
+func (rn *RaftNodeImpl) BroadcastMessage(msg RaftOperation) {
 	opType := msg.OpType()
 	msgEnvelope := Envelope{
 		OperationType: opType,
 		Payload:       msg.Bytes(),
 	}
-	rn.Log("broadcasting %s to cluster: %+v", opType, msg)
+	rn.Log("Broadcast: %s", messageToString(opType, msg))
 	rn.network.Broadcast(msgEnvelope.Bytes())
 }
 
@@ -822,7 +857,7 @@ func (rn *RaftNodeImpl) SendMessage(peerId string, msg RaftOperation) {
 		OperationType: opType,
 		Payload:       msg.Bytes(),
 	}
-	rn.Log("sending %s to %s: %+v", opType, peerId, msg)
+	rn.Log("Send to %s: %s", peerId, messageToString(opType, msg))
 	rn.network.Send(peerId, msgEnvelope.Bytes())
 }
 
@@ -873,4 +908,73 @@ func stopAndDrainTicker(t *time.Ticker) {
 
 func randomTimerDuration(min time.Duration, max time.Duration) time.Duration {
 	return min + time.Duration(rand.Float64()*(float64(max-min)))
+}
+
+func messageToString(opType OperationType, message any) string {
+
+	var msgString string
+
+	switch opType {
+	case VoteRequestOp:
+		voteRequest := message.(*VoteRequest)
+		msgString = fmt.Sprintf(
+			"FROM:%s T:%d LLI:%d LLT:%d",
+			voteRequest.CandidateId,
+			voteRequest.Term,
+			voteRequest.LastLogIndex,
+			voteRequest.LastLogTerm,
+		)
+	case VoteResponseOp:
+		voteResponse := message.(*VoteResponse)
+		msgString = fmt.Sprintf(
+			"FROM:%s T:%d G?:%v",
+			voteResponse.VoterId,
+			voteResponse.Term,
+			voteResponse.VoteGranted,
+		)
+	case AppendEntriesRequestOp:
+		appendEntriesRequest := message.(*AppendEntriesRequest)
+
+		totalEntriesSize := uint64(0)
+		entriesSummary := strings.Builder{}
+		entriesSummary.WriteString("[")
+		for i, entry := range appendEntriesRequest.Entries {
+			entrySize := uint64(len(entry.Cmd))
+			totalEntriesSize += entrySize
+			entriesSummary.WriteString(
+				fmt.Sprintf(
+					"{(I:%d) T:%d [...] %dB}",
+					appendEntriesRequest.PrevLogIdx+uint64(i+1),
+					entry.Term,
+					entrySize,
+				),
+			)
+		}
+		entriesSummary.WriteString(
+			fmt.Sprintf("](%d - %dB)", len(appendEntriesRequest.Entries), totalEntriesSize),
+		)
+		msgString = fmt.Sprintf(
+			"FROM:%s T:%d PLI:%d PLT:%d LCI:%d E:%s",
+			appendEntriesRequest.LeaderId,
+			appendEntriesRequest.Term,
+			appendEntriesRequest.PrevLogIdx,
+			appendEntriesRequest.PrevLogTerm,
+			appendEntriesRequest.LeaderCommitIdx,
+			entriesSummary.String(),
+		)
+	case AppendEntriesResponseOp:
+		appendEntriesResponse := message.(*AppendEntriesResponse)
+		msgString = fmt.Sprintf(
+			"FROM:%s T:%d MI:%d S?:%v",
+			appendEntriesResponse.ResponderId,
+			appendEntriesResponse.Term,
+			appendEntriesResponse.MatchIndex,
+			appendEntriesResponse.Success,
+		)
+
+	default:
+		panic(fmt.Sprintf("unknown message type %s", opType))
+	}
+
+	return fmt.Sprintf("%s:{%s}", opType, msgString)
 }
