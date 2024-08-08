@@ -818,12 +818,12 @@ var ErrNotLeader = fmt.Errorf("not leader")
 func (rn *RaftNodeImpl) Propose(msg []byte) error {
 	// HACK:this way of accepting proposals might have false positives/negatives
 	if rn.acceptingProposals.Load() {
-		var proposal []byte
+		proposal := make([]byte, len(msg))
 		bytesCopied := copy(proposal, msg)
 		if len(msg) != bytesCopied {
 			panic("failed to copy buffer")
 		}
-		rn.inboundProposals <- msg
+		rn.inboundProposals <- proposal
 	}
 	return nil
 }
