@@ -3,9 +3,11 @@ package main
 import (
 	"flag"
 	"fmt"
+	"math/rand"
 	"os"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/nats-io/nats.go"
 
@@ -60,6 +62,17 @@ func main() {
 	srv := server.NewServer(replicaId, raftNode, sm)
 	srv.Start()
 
+	rng := rand.New(rand.NewSource(12345))
+	buffer := make([]byte, 10)
+
 	// Block forever
-	select {}
+	for {
+		select {
+		case <-time.After(3 * time.Second):
+			rng.Read(buffer)
+			if err := srv.Propose(buffer); err != nil {
+				panic(err)
+			}
+		}
+	}
 }
