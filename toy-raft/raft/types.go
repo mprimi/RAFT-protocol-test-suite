@@ -84,7 +84,6 @@ const (
 	VoteResponseOp
 	AppendEntriesRequestOp
 	AppendEntriesResponseOp
-	ProposalRequestOp
 )
 
 func (ot OperationType) String() string {
@@ -97,8 +96,6 @@ func (ot OperationType) String() string {
 		return "AppendEntriesRequest"
 	case AppendEntriesResponseOp:
 		return "AppendEntriesResponse"
-	case ProposalRequestOp:
-		return "ProposalRequest"
 	default:
 		return "unknown operation type"
 	}
@@ -215,31 +212,6 @@ func LoadVoteResponse(bytes []byte) VoteResponse {
 		panic(err)
 	}
 	return resp
-}
-
-type ProposalRequest struct {
-	Data []byte `json:"data"`
-}
-
-func (req *ProposalRequest) Bytes() []byte {
-	bytes, err := json.Marshal(req)
-	if err != nil {
-		panic(err)
-	}
-	return bytes
-}
-
-func (req *ProposalRequest) OpType() OperationType {
-	return ProposalRequestOp
-}
-
-func LoadProposalRequest(bytes []byte) ProposalRequest {
-	var req ProposalRequest
-	err := json.Unmarshal(bytes, &req)
-	if err != nil {
-		panic(err)
-	}
-	return req
 }
 
 type FollowerState struct {

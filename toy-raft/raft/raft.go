@@ -2,7 +2,6 @@ package raft
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log"
 	"math/rand"
@@ -105,8 +104,6 @@ func parseMessage(messageBytes []byte) (OperationType, any, error) {
 		message = &AppendEntriesRequest{}
 	case AppendEntriesResponseOp:
 		message = &AppendEntriesResponse{}
-	case ProposalRequestOp:
-		message = &ProposalRequest{}
 	default:
 		return 0, nil, fmt.Errorf("unknown operation type %d", envelope.OperationType)
 	}
@@ -175,17 +172,6 @@ func (rn *RaftNodeImpl) processOneTransistionInternal(inactivityTimeout time.Dur
 		rn.LogState("Processing %s", messageToString(opType, message))
 
 		switch opType {
-		case ProposalRequestOp:
-			proposalRequest := message.(*ProposalRequest)
-			err := rn.Propose(proposalRequest.Data)
-			if errors.Is(err, ErrNotLeader) {
-				// ignore
-			} else if err != nil {
-				panic(fmt.Sprintf("failed to propose: %s", err))
-			} else {
-				rn.Log("proposal of %d bytes accepted", len(proposalRequest.Data))
-			}
-
 		case AppendEntriesRequestOp:
 			appendEntriesRequest := message.(*AppendEntriesRequest)
 			rn.Log("received AppendEntries request from %s, leader term: %d, prevLogIdx: %d, prevLogTerm: %d, leaderCommitIdx: %d", appendEntriesRequest.LeaderId, appendEntriesRequest.Term, appendEntriesRequest.PrevLogIdx, appendEntriesRequest.PrevLogTerm, appendEntriesRequest.LeaderCommitIdx)
