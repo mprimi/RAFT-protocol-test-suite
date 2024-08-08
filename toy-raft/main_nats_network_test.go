@@ -5,6 +5,7 @@ import (
 	"log"
 	"math/rand"
 	"time"
+
 	"toy-raft/checks"
 	"toy-raft/network"
 	"toy-raft/raft"
@@ -14,16 +15,18 @@ import (
 
 func TestRaftWithNatsNetwork() {
 
+	n := 10
+	groupId := "foo"
 	ids := []string{"A", "B", "C"}
 	servers := make([]*server.ServerImpl, 0, 3)
 
 	for _, id := range ids {
-		net, err := network.NewNatsNetwork("foo", "nats://127.0.0.1:18001,nats://127.0.0.1:18002,nats://127.0.0.1:18003,nats://127.0.0.1:18004,nats://127.0.0.1:18005,")
+		net, err := network.NewNatsNetwork(groupId, "nats://127.0.0.1:18001,nats://127.0.0.1:18002,nats://127.0.0.1:18003,nats://127.0.0.1:18004,nats://127.0.0.1:18005,")
 		if err != nil {
 			panic(err)
 		}
 		sm := state.NewKeepLastBlocksStateMachine(id, n)
-		raftNode := raft.NewRaftNodeImpl(id, sm, raft.NewInMemoryStorage(), net, ids)
+		raftNode := raft.NewRaftNodeImpl(id, groupId, sm, raft.NewInMemoryStorage(), net, ids)
 		net.RegisterNode(id, raftNode)
 		server := server.NewServer(
 			id,

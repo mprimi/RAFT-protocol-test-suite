@@ -32,7 +32,11 @@ type RaftOperation interface {
 }
 
 type RaftNodeImpl struct {
-	id           string
+	// Replica ID
+	id string
+	// RAFT Group ID
+	groupId string
+
 	stateMachine state.StateMachine
 
 	quitCh chan bool
@@ -68,13 +72,14 @@ type RaftNodeImpl struct {
 	lastApplied uint64
 }
 
-func NewRaftNodeImpl(id string, sm state.StateMachine, storage Storage, network network.Network, peers []string) *RaftNodeImpl {
+func NewRaftNodeImpl(id string, groupId string, sm state.StateMachine, storage Storage, network network.Network, peers []string) *RaftNodeImpl {
 	peersMap := make(map[string]bool, len(peers))
 	for _, peer := range peers {
 		peersMap[peer] = true
 	}
 	return &RaftNodeImpl{
 		id:               id,
+		groupId:          groupId,
 		storage:          storage,
 		stateMachine:     sm,
 		network:          network,
@@ -772,7 +777,7 @@ func (rn *RaftNodeImpl) Log(format string, args ...any) {
 
 	header := fmt.Sprintf(
 		"[RAFT %s] [%s - %s - T:%d LLI:%d C:%d A:%d] ",
-		"?", //TODO Add group name
+		rn.groupId,
 		rn.id,
 		stateIcon(),
 		rn.storage.GetCurrentTerm(),

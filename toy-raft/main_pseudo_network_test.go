@@ -5,6 +5,7 @@ import (
 	"log"
 	"math/rand"
 	"time"
+
 	"toy-raft/checks"
 	"toy-raft/network"
 	"toy-raft/raft"
@@ -16,12 +17,14 @@ func main_old() {
 
 	net := network.NewPseudoAsyncNetwork(60)
 
+	n := 10
+	groupId := "foo"
 	ids := []string{"A", "B", "C"}
 	servers := make([]*server.ServerImpl, 0, 3)
 
 	for _, id := range ids {
 		sm := state.NewKeepLastBlocksStateMachine(id, n)
-		raftNode := raft.NewRaftNodeImpl(id, sm, raft.NewInMemoryStorage(), net, ids)
+		raftNode := raft.NewRaftNodeImpl(id, groupId, sm, raft.NewInMemoryStorage(), net, ids)
 		net.RegisterNode(id, raftNode)
 		server := server.NewServer(
 			id,
