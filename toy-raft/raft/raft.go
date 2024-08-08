@@ -330,11 +330,16 @@ func (rn *RaftNodeImpl) processOneTransistionInternal(inactivityTimeout time.Dur
 			} else {
 				// NOTE: this only executes if log doesn't match
 
-				// guard:
-				if followerState.nextIndex == 1 {
-					panic(fmt.Sprintf("cannot decrement nextIndex for follower %s below 1", appendEntriesResponse.ResponderId))
+				// minimum next index is 1
+				if followerState.nextIndex > 1 {
+					followerState.nextIndex -= 1
 				}
-				followerState.nextIndex -= 1
+
+				// guard:
+				if followerState.nextIndex < 1 {
+					panic(fmt.Sprintf("nextIndex for follower %s is below 1", appendEntriesResponse.ResponderId))
+				}
+
 				// guard:
 				// BUG: this is being violated sometimes
 				if followerState.nextIndex <= followerState.matchIndex {
