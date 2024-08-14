@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"path/filepath"
 
+	"github.com/antithesishq/antithesis-sdk-go/assert"
 	"github.com/dgraph-io/badger/v4"
 )
 
@@ -90,6 +91,13 @@ func (store *BadgerStorage) setLastLogIdx(newLastLogIdx uint64) {
 	if currentLastLogIdx == 0 && newLastLogIdx == 0 {
 		// initial case, don't panic
 	} else if newLastLogIdx == currentLastLogIdx {
+		assert.Unreachable(
+			"Setting invalid lastLogIndex",
+			map[string]any{
+				"newLastLogIdx":     newLastLogIdx,
+				"currentLastLogIdx": currentLastLogIdx,
+			},
+		)
 		panic(fmt.Errorf("setting invalid last log index"))
 	}
 
@@ -107,11 +115,18 @@ func (store *BadgerStorage) setLastLogIdx(newLastLogIdx uint64) {
 }
 
 func (store *BadgerStorage) GetLogEntry(idx uint64) (*Entry, bool) {
+	lastLogIdx := store.GetLastLogIndex()
 	if idx == 0 {
+		assert.Unreachable(
+			"Invalid entry lookup index",
+			map[string]any{
+				"index":      idx,
+				"lastLogIdx": lastLogIdx,
+			},
+		)
 		panic(fmt.Errorf("invalid entry lookup index"))
 	}
 
-	lastLogIdx := store.GetLastLogIndex()
 	if idx > lastLogIdx {
 		return nil, false
 	}
@@ -133,6 +148,13 @@ func (store *BadgerStorage) GetLogEntry(idx uint64) (*Entry, bool) {
 		return nil
 	})
 	if err != nil {
+		assert.Unreachable(
+			"Failed to load entry",
+			map[string]any{
+				"index":      idx,
+				"lastLogIdx": lastLogIdx,
+			},
+		)
 		panic(fmt.Errorf("failed to load entry: %w", err))
 	}
 
@@ -167,10 +189,17 @@ func (store *BadgerStorage) TestGetLogEntries() []*Entry {
 }
 
 func (store *BadgerStorage) DeleteEntriesFrom(startingLogIdx uint64) {
+	lastLogIdx := store.GetLastLogIndex()
 	if startingLogIdx == 0 {
+		assert.Unreachable(
+			"Invalid delete start index",
+			map[string]any{
+				"startingLogIdx": startingLogIdx,
+				"lastLogIdx":     lastLogIdx,
+			},
+		)
 		panic(fmt.Errorf("invalid delete start index"))
 	}
-	lastLogIdx := store.GetLastLogIndex()
 	err := store.db.Update(func(txn *badger.Txn) error {
 		for idx := startingLogIdx; idx <= lastLogIdx; idx++ {
 			err := txn.Delete(store.idxToKey(idx))
@@ -181,19 +210,32 @@ func (store *BadgerStorage) DeleteEntriesFrom(startingLogIdx uint64) {
 		return nil
 	})
 	if err != nil {
+		assert.Unreachable(
+			"Invalid delete entries",
+			map[string]any{
+				"startingLogIdx": startingLogIdx,
+				"lastLogIdx":     lastLogIdx,
+			},
+		)
 		panic(fmt.Errorf("failed to delete: %w", err))
 	}
 	store.setLastLogIdx(startingLogIdx - 1)
 }
 
-func (store *BadgerStorage) GetLastLogIndexAndTerm() (index uint64, term uint64) {
-	index = store.GetLastLogIndex()
-	if index == 0 {
+func (store *BadgerStorage) GetLastLogIndexAndTerm() (lastLogIndex uint64, term uint64) {
+	lastLogIndex = store.GetLastLogIndex()
+	if lastLogIndex == 0 {
 		term = 0
 		return
 	}
-	entry, exists := store.GetLogEntry(index)
+	entry, exists := store.GetLogEntry(lastLogIndex)
 	if !exists {
+		assert.Unreachable(
+			"Non-existent entry term lookup",
+			map[string]any{
+				"lastLogIndex": lastLogIndex,
+			},
+		)
 		panic(fmt.Errorf("expected existing entry not found"))
 	}
 	term = entry.Term
@@ -232,6 +274,13 @@ func (store *BadgerStorage) idxToKey(idx uint64) []byte {
 
 func (store *BadgerStorage) AppendEntry(entry Entry) error {
 	if store.GetCurrentTerm() == 0 {
+		assert.Unreachable(
+			"Append entry with zero term",
+			map[string]any{
+				"entry":       entry.Term,
+				"currentTerm": 0,
+			},
+		)
 		panic("append entry with zero term")
 	}
 
@@ -260,11 +309,27 @@ func (store *BadgerStorage) AppendEntry(entry Entry) error {
 func (store *BadgerStorage) VoteFor(id string, currentTerm uint64) {
 	storedCurrentTerm := store.GetCurrentTerm()
 	if storedCurrentTerm != currentTerm {
+		assert.Unreachable(
+			"Vote commit term mismatch",
+			map[string]any{
+				"currentTerm": currentTerm,
+				"storedTerm":  storedCurrentTerm,
+				"id":          id,
+			},
+		)
 		panic(fmt.Errorf("unexpected term during vote commit"))
 	}
 
 	storedVote := store.GetVotedFor()
 	if storedVote != "" {
+		assert.Unreachable(
+			"Already voted for different node in this term",
+			map[string]any{
+				"currentTerm": currentTerm,
+				"storedVote":  storedVote,
+				"id":          id,
+			},
+		)
 		panic(fmt.Errorf("already voted in this term"))
 	}
 
@@ -330,6 +395,13 @@ func (store *BadgerStorage) SetTerm(term uint64) {
 	if currentTerm == 0 && term == 0 {
 		// initial case, don't panic
 	} else if term <= currentTerm {
+		assert.Unreachable(
+			"Attempting to decrease term",
+			map[string]any{
+				"currentTerm": currentTerm,
+				"newTerm":     term,
+			},
+		)
 		panic(fmt.Errorf("attempting to decrease term"))
 	}
 

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"math/rand"
@@ -9,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/antithesishq/antithesis-sdk-go/assert"
 	"github.com/nats-io/nats.go"
 
 	"toy-raft/network"
@@ -71,7 +73,17 @@ func main() {
 		case <-time.After(3 * time.Second):
 			rng.Read(buffer)
 			if err := srv.Propose(buffer); err != nil {
-				panic(err)
+				if errors.Is(err, raft.ErrNotLeader) {
+					fmt.Printf("Proposal rejected, node is not leader\n")
+				} else {
+					assert.Unreachable(
+						"Propose error",
+						map[string]any{
+							"error": err.Error(),
+						},
+					)
+					panic(err)
+				}
 			}
 		}
 	}

@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/antithesishq/antithesis-sdk-go/assert"
 	"golang.org/x/exp/maps"
 
 	"toy-raft/network"
@@ -113,6 +114,13 @@ func parseMessage(messageBytes []byte) (OperationType, any, error) {
 		return 0, nil, fmt.Errorf("unknown operation type %d", envelope.OperationType)
 	}
 	if err := json.Unmarshal(envelope.Payload, message); err != nil {
+		assert.Unreachable(
+			"Failed to decode protocol message",
+			map[string]any{
+				"op":  envelope.OperationType,
+				"err": err.Error(),
+			},
+		)
 		return 0, nil, fmt.Errorf("failed to parse message: %w", err)
 	}
 
@@ -259,6 +267,17 @@ func (rn *RaftNodeImpl) processOneTransistionInternal(inactivityTimeout time.Dur
 				rn.commitIndex = min(appendEntriesRequest.LeaderCommitIdx, indexOfLastNewEntry)
 				// guard: commit index should only increase monotonically
 				if rn.commitIndex < prevCommitIndex {
+					assert.Unreachable(
+						"Non monotonic commit index",
+						map[string]any{
+							"commitIndex":          rn.commitIndex,
+							"prevCommitIndex":      prevCommitIndex,
+							"aeRequestCommitIndex": appendEntriesRequest.LeaderCommitIdx,
+							"indexOfLastNewEntry":  indexOfLastNewEntry,
+							"aeRequestSender":      appendEntriesRequest.LeaderId,
+							"aeRequestTerm":        appendEntriesRequest.Term,
+						},
+					)
 					panic(fmt.Errorf("attempting to decrease commit index"))
 				}
 			}
@@ -270,6 +289,17 @@ func (rn *RaftNodeImpl) processOneTransistionInternal(inactivityTimeout time.Dur
 
 			// guard:
 			if rn.commitIndex > rn.storage.GetLastLogIndex() {
+				assert.Unreachable(
+					"Commit index points to entries not in log",
+					map[string]any{
+						"commitIndex":          rn.commitIndex,
+						"lastLogIndex":         rn.storage.GetLastLogIndex(),
+						"aeRequestCommitIndex": appendEntriesRequest.LeaderCommitIdx,
+						"indexOfLastNewEntry":  indexOfLastNewEntry,
+						"aeRequestSender":      appendEntriesRequest.LeaderId,
+						"aeRequestTerm":        appendEntriesRequest.Term,
+					},
+				)
 				panic(fmt.Errorf("attempting to set commit index beyond last log index"))
 			}
 
@@ -278,6 +308,20 @@ func (rn *RaftNodeImpl) processOneTransistionInternal(inactivityTimeout time.Dur
 				entry, exists := rn.storage.GetLogEntry(i)
 				// guard:
 				if !exists || entry == nil {
+					assert.Unreachable(
+						"Commit index points to entries not in log",
+						map[string]any{
+							"lastApplied":          rn.lastApplied,
+							"i":                    i,
+							"entryExists":          exists,
+							"entryIsNil":           entry == nil,
+							"lastLogIndex":         rn.storage.GetLastLogIndex(),
+							"aeRequestCommitIndex": appendEntriesRequest.LeaderCommitIdx,
+							"indexOfLastNewEntry":  indexOfLastNewEntry,
+							"aeRequestSender":      appendEntriesRequest.LeaderId,
+							"aeRequestTerm":        appendEntriesRequest.Term,
+						},
+					)
 					panic(fmt.Errorf("attempting to apply entry that is not in log"))
 				}
 				rn.Log("applying entry %d to state machine", i)
@@ -314,6 +358,14 @@ func (rn *RaftNodeImpl) processOneTransistionInternal(inactivityTimeout time.Dur
 			followerState, exists := rn.followersStateMap[appendEntriesResponse.ResponderId]
 			// guard:
 			if !exists {
+				assert.Unreachable(
+					"Peer not present in followers map",
+					map[string]any{
+						"peers":             maps.Keys(rn.peers),
+						"followers":         maps.Keys(rn.followersStateMap),
+						"followerResponder": appendEntriesResponse.ResponderId,
+					},
+				)
 				panic(fmt.Errorf("peer is not in followers map"))
 			}
 
@@ -324,6 +376,15 @@ func (rn *RaftNodeImpl) processOneTransistionInternal(inactivityTimeout time.Dur
 			if appendEntriesResponse.Success {
 				// guard:
 				if appendEntriesResponse.MatchIndex < followerState.matchIndex {
+					assert.Unreachable(
+						"Match index in response is lower than expected",
+						map[string]any{
+							"aeResponseMatchIndex": appendEntriesResponse.MatchIndex,
+							"followerMatchIndex":   followerState.matchIndex,
+							"followerResponder":    appendEntriesResponse.ResponderId,
+							"followerState":        followerState,
+						},
+					)
 					panic(fmt.Errorf("match index lower than follower match index"))
 				} else if followerState.matchIndex == appendEntriesResponse.MatchIndex {
 					// match index didn't change
@@ -341,13 +402,18 @@ func (rn *RaftNodeImpl) processOneTransistionInternal(inactivityTimeout time.Dur
 				}
 
 				// guard:
-				if followerState.nextIndex < 1 {
-					panic(fmt.Sprintf("nextIndex for follower %s is below 1", appendEntriesResponse.ResponderId))
-				}
-
-				// guard:
-				// BUG: this is being violated sometimes
 				if followerState.nextIndex <= followerState.matchIndex {
+					// TODO maybe should consider this request invalid and ignore it?
+					// TODO maybe should add this guard before sending the response
+					assert.Unreachable(
+						"Invalid follower state, nextIndex is not greater than matchIndex",
+						map[string]any{
+							"followerResponder":    appendEntriesResponse.ResponderId,
+							"followerState":        followerState,
+							"aeResponseMatchIndex": appendEntriesResponse.MatchIndex,
+							"aeResponseTerm":       appendEntriesResponse.Term,
+						},
+					)
 					panic(fmt.Errorf("follower nextIndex <= matchIndex "))
 				}
 
@@ -355,6 +421,16 @@ func (rn *RaftNodeImpl) processOneTransistionInternal(inactivityTimeout time.Dur
 				prevLogEntry, exists := rn.storage.GetLogEntry(prevLogIndex)
 				// guard:
 				if !exists {
+					assert.Unreachable(
+						"Entry for follower does not exist",
+						map[string]any{
+							"followerResponder":    appendEntriesResponse.ResponderId,
+							"followerState":        followerState,
+							"aeResponseMatchIndex": appendEntriesResponse.MatchIndex,
+							"aeResponseTerm":       appendEntriesResponse.Term,
+							"prevLogIndex":         prevLogIndex,
+						},
+					)
 					panic(fmt.Errorf("log entry does not exist"))
 				}
 
@@ -373,6 +449,13 @@ func (rn *RaftNodeImpl) processOneTransistionInternal(inactivityTimeout time.Dur
 			if matchIndexUpdated {
 				// guard:
 				if currentTerm != rn.storage.GetCurrentTerm() {
+					assert.Unreachable(
+						"Unexpected term",
+						map[string]any{
+							"currentTerm": currentTerm,
+							"storedTerm":  rn.storage.GetCurrentTerm(),
+						},
+					)
 					panic(fmt.Errorf("unexpected term change while processing AppendEntriesResponse"))
 				}
 
@@ -383,10 +466,18 @@ func (rn *RaftNodeImpl) processOneTransistionInternal(inactivityTimeout time.Dur
 				lowerBound := rn.commitIndex + 1
 
 				for n := upperBound; n >= lowerBound; n-- {
-
 					logEntry, exists := rn.storage.GetLogEntry(n)
 					// guard:
 					if !exists {
+						assert.Unreachable(
+							"Attempting to load entry that does not exist",
+							map[string]any{
+								"index":        n,
+								"upperBound":   upperBound,
+								"lowerBound":   lowerBound,
+								"lastLogIndex": lastLogIndex,
+							},
+						)
 						panic(fmt.Errorf("attempt to load entry that does not exist"))
 					}
 
@@ -559,6 +650,15 @@ func (rn *RaftNodeImpl) processOneTransistionInternal(inactivityTimeout time.Dur
 					prevLogEntry, exists := rn.storage.GetLogEntry(prevLogIndex)
 					// guard:
 					if !exists {
+						assert.Unreachable(
+							"Load entry that does not exist",
+							map[string]any{
+								"followerId":    followerId,
+								"followerState": followerState,
+								"index":         prevLogIndex,
+								"lastLogIndex":  rn.storage.GetLastLogIndex(),
+							},
+						)
 						panic(fmt.Errorf("attempting to load non-existent entry"))
 					}
 					prevLogTerm = prevLogEntry.Term
@@ -590,6 +690,12 @@ func (rn *RaftNodeImpl) isKnownPeer(peerId string) bool {
 func (rn *RaftNodeImpl) ascendToLeader() {
 	// guard:
 	if rn.state != Candidate {
+		assert.Unreachable(
+			"Transitioning to leader when not candidate",
+			map[string]any{
+				"state": rn.state,
+			},
+		)
 		panic(fmt.Errorf("transition to leader from state %s", rn.state))
 	}
 	// guard:
@@ -632,6 +738,12 @@ func (rn *RaftNodeImpl) ascendToLeader() {
 		lastLogEntry, exists := rn.storage.GetLogEntry(prevLogIdx)
 		// guard:
 		if !exists {
+			assert.Unreachable(
+				"Failed to look up last log entry",
+				map[string]any{
+					"lastLogIndex": prevLogIdx,
+				},
+			)
 			panic(fmt.Errorf("last log entry does not exist"))
 		}
 		prevLogTerm = lastLogEntry.Term
@@ -828,7 +940,10 @@ func (rn *RaftNodeImpl) Propose(msg []byte) error {
 		if len(msg) != bytesCopied {
 			panic("failed to copy buffer")
 		}
+		//TODO: inbound proposals channel should be bound, this call should fail if it the channel is full
 		rn.inboundProposals <- proposal
+	} else {
+		return ErrNotLeader
 	}
 	return nil
 }

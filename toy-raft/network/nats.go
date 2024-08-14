@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 
+	"github.com/antithesishq/antithesis-sdk-go/assert"
 	"github.com/nats-io/nats.go"
 )
 
@@ -50,6 +51,13 @@ func (net *NatsNetwork) RegisterNode(id string, networkDevice NetworkDevice) {
 			networkDevice.Receive(msg.Data)
 		})
 		if err != nil {
+			assert.Unreachable(
+				"Failed to subscribe",
+				map[string]any{
+					"subject": recipientSubj,
+					"error":   err.Error(),
+				},
+			)
 			panic(fmt.Errorf("failed to subscribe: %w", err))
 		}
 	}
@@ -60,6 +68,13 @@ func (net *NatsNetwork) RegisterNode(id string, networkDevice NetworkDevice) {
 			networkDevice.Receive(msg.Data)
 		})
 		if err != nil {
+			assert.Unreachable(
+				"Failed to subscribe to broadcast",
+				map[string]any{
+					"subject": net.broadcastSubject,
+					"error":   err.Error(),
+				},
+			)
 			panic(fmt.Errorf("failed to subscribe to broadcast: %w", err))
 		}
 	}
