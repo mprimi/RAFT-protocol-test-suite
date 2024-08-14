@@ -113,7 +113,7 @@ func parseMessage(messageBytes []byte) (OperationType, any, error) {
 		return 0, nil, fmt.Errorf("unknown operation type %d", envelope.OperationType)
 	}
 	if err := json.Unmarshal(envelope.Payload, message); err != nil {
-		panic(err)
+		return 0, nil, fmt.Errorf("failed to parse message: %w", err)
 	}
 
 	return envelope.OperationType, message, nil
@@ -160,7 +160,7 @@ func (rn *RaftNodeImpl) processOneTransistionInternal(inactivityTimeout time.Dur
 				Cmd:  msgCopy,
 			}
 			if err := rn.storage.AppendEntry(entry); err != nil {
-				panic(err)
+				panic(fmt.Errorf("failed to append entry: %w", err))
 			}
 		} else {
 			rn.Log("ignoring proposal since we are not leader")
@@ -259,7 +259,7 @@ func (rn *RaftNodeImpl) processOneTransistionInternal(inactivityTimeout time.Dur
 				rn.commitIndex = min(appendEntriesRequest.LeaderCommitIdx, indexOfLastNewEntry)
 				// guard: commit index should only increase monotonically
 				if rn.commitIndex < prevCommitIndex {
-					panic(fmt.Sprintf("commit index %d is less than previous commit index %d", rn.commitIndex, prevCommitIndex))
+					panic(fmt.Errorf("attempting to decrease commit index"))
 				}
 			}
 
@@ -270,7 +270,7 @@ func (rn *RaftNodeImpl) processOneTransistionInternal(inactivityTimeout time.Dur
 
 			// guard:
 			if rn.commitIndex > rn.storage.GetLastLogIndex() {
-				panic(fmt.Sprintf("commit index %d is greater than last log index %d", rn.commitIndex, rn.storage.GetLastLogIndex()))
+				panic(fmt.Errorf("attempting to set commit index beyond last log index"))
 			}
 
 			// apply newly committed entries
@@ -278,7 +278,7 @@ func (rn *RaftNodeImpl) processOneTransistionInternal(inactivityTimeout time.Dur
 				entry, exists := rn.storage.GetLogEntry(i)
 				// guard:
 				if !exists || entry == nil {
-					panic(fmt.Sprintf("no log entry at index %d", i))
+					panic(fmt.Errorf("attempting to apply entry that is not in log"))
 				}
 				rn.Log("applying entry %d to state machine", i)
 				rn.applyUpdate(entry)
@@ -314,7 +314,7 @@ func (rn *RaftNodeImpl) processOneTransistionInternal(inactivityTimeout time.Dur
 			followerState, exists := rn.followersStateMap[appendEntriesResponse.ResponderId]
 			// guard:
 			if !exists {
-				panic(fmt.Sprintf("responder %s is a valid peer but was not found in followers state map", appendEntriesResponse.ResponderId))
+				panic(fmt.Errorf("peer is not in followers map"))
 			}
 
 			// successfully received a response from this follower
@@ -324,7 +324,7 @@ func (rn *RaftNodeImpl) processOneTransistionInternal(inactivityTimeout time.Dur
 			if appendEntriesResponse.Success {
 				// guard:
 				if appendEntriesResponse.MatchIndex < followerState.matchIndex {
-					panic(fmt.Sprintf("match index %d is less than follower match index %d", appendEntriesResponse.MatchIndex, followerState.matchIndex))
+					panic(fmt.Errorf("match index lower than follower match index"))
 				} else if followerState.matchIndex == appendEntriesResponse.MatchIndex {
 					// match index didn't change
 				} else {
@@ -348,14 +348,14 @@ func (rn *RaftNodeImpl) processOneTransistionInternal(inactivityTimeout time.Dur
 				// guard:
 				// BUG: this is being violated sometimes
 				if followerState.nextIndex <= followerState.matchIndex {
-					panic("nextIndex must be greater than matchIndex")
+					panic(fmt.Errorf("follower nextIndex <= matchIndex "))
 				}
 
 				prevLogIndex := followerState.nextIndex - 1
 				prevLogEntry, exists := rn.storage.GetLogEntry(prevLogIndex)
 				// guard:
 				if !exists {
-					panic(fmt.Sprintf("no log entry at index %d", prevLogIndex))
+					panic(fmt.Errorf("log entry does not exist"))
 				}
 
 				entries := rn.entriesToSendToFollower(appendEntriesResponse.ResponderId)
@@ -373,7 +373,7 @@ func (rn *RaftNodeImpl) processOneTransistionInternal(inactivityTimeout time.Dur
 			if matchIndexUpdated {
 				// guard:
 				if currentTerm != rn.storage.GetCurrentTerm() {
-					panic(fmt.Sprintf("unexpected term change while handling AE response, expected: %d, actual: %d", currentTerm, rn.storage.GetCurrentTerm()))
+					panic(fmt.Errorf("unexpected term change while processing AppendEntriesResponse"))
 				}
 
 				quorum := len(rn.peers)/2 + 1
@@ -387,7 +387,7 @@ func (rn *RaftNodeImpl) processOneTransistionInternal(inactivityTimeout time.Dur
 					logEntry, exists := rn.storage.GetLogEntry(n)
 					// guard:
 					if !exists {
-						panic(fmt.Sprintf("log entry at %d, doesn't exist", n))
+						panic(fmt.Errorf("attempt to load entry that does not exist"))
 					}
 
 					// NOTE: as an optimization we could just break here since it is guaranteed that all
@@ -520,7 +520,7 @@ func (rn *RaftNodeImpl) processOneTransistionInternal(inactivityTimeout time.Dur
 	case <-rn.electionTimeoutTimer.C:
 		// guard:
 		if rn.state != Follower {
-			panic(fmt.Sprintf("election timeout while in state %s", rn.state))
+			panic(fmt.Errorf("election timeout while in state %s", rn.state))
 		}
 		rn.Log("election timeout, converting to candidate")
 		rn.convertToCandidate()
@@ -528,7 +528,7 @@ func (rn *RaftNodeImpl) processOneTransistionInternal(inactivityTimeout time.Dur
 	case <-rn.voteResponseTimeoutTimer.C:
 		// guard:
 		if rn.state != Candidate {
-			panic(fmt.Sprintf("vote response timeout while in state %s", rn.state))
+			panic(fmt.Errorf("vote response timeout while in state %s", rn.state))
 		}
 		rn.Log("election timeout, restarting campaign")
 		rn.convertToCandidate()
@@ -536,7 +536,7 @@ func (rn *RaftNodeImpl) processOneTransistionInternal(inactivityTimeout time.Dur
 	case <-rn.sendAppendEntriesTicker.C:
 		// guard:
 		if rn.state != Leader {
-			panic(fmt.Sprintf("send append entries ticker fired in state %s", rn.state))
+			panic(fmt.Errorf("send append entries tick in state %s", rn.state))
 		}
 
 		for followerId, followerState := range rn.followersStateMap {
@@ -559,7 +559,7 @@ func (rn *RaftNodeImpl) processOneTransistionInternal(inactivityTimeout time.Dur
 					prevLogEntry, exists := rn.storage.GetLogEntry(prevLogIndex)
 					// guard:
 					if !exists {
-						panic(fmt.Sprintf("no log entry at index %d", prevLogIndex))
+						panic(fmt.Errorf("attempting to load non-existent entry"))
 					}
 					prevLogTerm = prevLogEntry.Term
 				}
@@ -590,11 +590,11 @@ func (rn *RaftNodeImpl) isKnownPeer(peerId string) bool {
 func (rn *RaftNodeImpl) ascendToLeader() {
 	// guard:
 	if rn.state != Candidate {
-		panic(fmt.Sprintf("%s attempted to transition to leader when not previously a candidate", rn.state))
+		panic(fmt.Errorf("transition to leader from state %s", rn.state))
 	}
 	// guard:
 	if rn.followersStateMap != nil {
-		panic("followersStateMap is not nil")
+		panic(fmt.Errorf("followersStateMap is not nil during leader transition"))
 	}
 
 	rn.Log("ascending to leader")
@@ -619,7 +619,7 @@ func (rn *RaftNodeImpl) ascendToLeader() {
 	swapped := rn.acceptingProposals.CompareAndSwap(false, true)
 	// guard:
 	if !swapped {
-		panic("unexpectedly was accepting proposals")
+		panic(fmt.Errorf("accepting proposals before being leader"))
 	}
 
 	// leader state is initialized
@@ -632,7 +632,7 @@ func (rn *RaftNodeImpl) ascendToLeader() {
 		lastLogEntry, exists := rn.storage.GetLogEntry(prevLogIdx)
 		// guard:
 		if !exists {
-			panic("last log entry does not exist")
+			panic(fmt.Errorf("last log entry does not exist"))
 		}
 		prevLogTerm = lastLogEntry.Term
 	}
@@ -696,16 +696,16 @@ func (rn *RaftNodeImpl) stepdown() {
 	{
 		// has followers state iff leader
 		if currentState == Leader && rn.followersStateMap == nil {
-			panic("a leader should have a followersStateMap")
+			panic(fmt.Errorf("leader followersStateMap is nil when stepping down"))
 		} else if currentState != Leader && rn.followersStateMap != nil {
-			panic(fmt.Sprintf("a %s should not have a followerStateMap", currentState))
+			panic(fmt.Errorf("followersStateMap present when stepping down from state: %s", currentState))
 		}
 
 		// has vote map iff candidate
 		if currentState == Candidate && rn.voteMap == nil {
-			panic("a candidate should have a vote map")
+			panic(fmt.Errorf("candidate voteMap is nil when stepping down"))
 		} else if currentState != Candidate && rn.voteMap != nil {
-			panic(fmt.Sprintf("a %s should not have a vote map", currentState))
+			panic(fmt.Errorf("voteMap present when stepping down from state: %s", currentState))
 		}
 	}
 
@@ -718,7 +718,7 @@ func (rn *RaftNodeImpl) stepdown() {
 		swapped := rn.acceptingProposals.CompareAndSwap(true, false)
 		// guard:
 		if !swapped {
-			panic("unexpectedly was not accepting proposals")
+			panic(fmt.Errorf("was not accepting proposals as leader"))
 		}
 	case Candidate:
 		rn.voteMap = nil
@@ -728,7 +728,7 @@ func (rn *RaftNodeImpl) stepdown() {
 	case Follower:
 		// already follower
 	default:
-		panic(fmt.Sprintf("unknown raft state %s", currentState))
+		panic(fmt.Errorf("unknown raft state %s", currentState))
 	}
 
 	rn.state = Follower

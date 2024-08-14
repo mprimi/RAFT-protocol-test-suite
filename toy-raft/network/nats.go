@@ -50,7 +50,7 @@ func (net *NatsNetwork) RegisterNode(id string, networkDevice NetworkDevice) {
 			networkDevice.Receive(msg.Data)
 		})
 		if err != nil {
-			panic(fmt.Sprintf("failed to subscribe to %s: %s", recipientSubj, err))
+			panic(fmt.Errorf("failed to subscribe: %w", err))
 		}
 	}
 
@@ -60,7 +60,7 @@ func (net *NatsNetwork) RegisterNode(id string, networkDevice NetworkDevice) {
 			networkDevice.Receive(msg.Data)
 		})
 		if err != nil {
-			panic(fmt.Sprintf("failed to subscribe to broadcast subject: %s", err))
+			panic(fmt.Errorf("failed to subscribe to broadcast: %w", err))
 		}
 	}
 }

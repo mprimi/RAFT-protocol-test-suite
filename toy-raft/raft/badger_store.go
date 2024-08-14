@@ -28,7 +28,7 @@ func NewDiskStorage(replicaId string, baseDir string) Storage {
 	dbPath := filepath.Join(baseDir, replicaId)
 	db, err := badger.Open(badger.DefaultOptions(dbPath))
 	if err != nil {
-		panic(fmt.Sprintf("failed to initialize database at %s: %s", dbPath, err))
+		panic(fmt.Errorf("failed to initialize database at %s: %w", dbPath, err))
 	}
 
 	store := &BadgerStorage{
@@ -49,7 +49,7 @@ func NewDiskStorage(replicaId string, baseDir string) Storage {
 		return nil
 	})
 	if err != nil {
-		panic(fmt.Sprintf("error checking for term upon init: %s", err))
+		panic(fmt.Errorf("failed to check term during init: %w", err))
 	}
 	if !keyExists {
 		store.storageInit()
@@ -61,7 +61,7 @@ func NewDiskStorage(replicaId string, baseDir string) Storage {
 func NewInMemoryStorage() Storage {
 	db, err := badger.Open(badger.DefaultOptions("").WithInMemory(true))
 	if err != nil {
-		panic(fmt.Sprintf("failed to start in-memory datastore: %s", err))
+		panic(fmt.Errorf("failed to init memory store: %w", err))
 	}
 
 	store := &BadgerStorage{
@@ -90,7 +90,7 @@ func (store *BadgerStorage) setLastLogIdx(newLastLogIdx uint64) {
 	if currentLastLogIdx == 0 && newLastLogIdx == 0 {
 		// initial case, don't panic
 	} else if newLastLogIdx == currentLastLogIdx {
-		panic(fmt.Sprintf("attempted to set lastLogIdx to %d when it was %d", newLastLogIdx, currentLastLogIdx))
+		panic(fmt.Errorf("setting invalid last log index"))
 	}
 
 	buf := make([]byte, 8)
@@ -102,13 +102,13 @@ func (store *BadgerStorage) setLastLogIdx(newLastLogIdx uint64) {
 		}
 		return nil
 	}); err != nil {
-		panic(err)
+		panic(fmt.Errorf("failed to commit last log index: %w", err))
 	}
 }
 
 func (store *BadgerStorage) GetLogEntry(idx uint64) (*Entry, bool) {
 	if idx == 0 {
-		panic("index cannot be zero")
+		panic(fmt.Errorf("invalid entry lookup index"))
 	}
 
 	lastLogIdx := store.GetLastLogIndex()
@@ -133,7 +133,7 @@ func (store *BadgerStorage) GetLogEntry(idx uint64) (*Entry, bool) {
 		return nil
 	})
 	if err != nil {
-		panic(err)
+		panic(fmt.Errorf("failed to load entry: %w", err))
 	}
 
 	return entry, true
@@ -168,7 +168,7 @@ func (store *BadgerStorage) TestGetLogEntries() []*Entry {
 
 func (store *BadgerStorage) DeleteEntriesFrom(startingLogIdx uint64) {
 	if startingLogIdx == 0 {
-		panic("cannot delete from 0, indexes start at 1")
+		panic(fmt.Errorf("invalid delete start index"))
 	}
 	lastLogIdx := store.GetLastLogIndex()
 	err := store.db.Update(func(txn *badger.Txn) error {
@@ -181,7 +181,7 @@ func (store *BadgerStorage) DeleteEntriesFrom(startingLogIdx uint64) {
 		return nil
 	})
 	if err != nil {
-		panic(err)
+		panic(fmt.Errorf("failed to delete: %w", err))
 	}
 	store.setLastLogIdx(startingLogIdx - 1)
 }
@@ -194,7 +194,7 @@ func (store *BadgerStorage) GetLastLogIndexAndTerm() (index uint64, term uint64)
 	}
 	entry, exists := store.GetLogEntry(index)
 	if !exists {
-		panic(fmt.Sprintf("no entry found at last log index: %d", index))
+		panic(fmt.Errorf("expected existing entry not found"))
 	}
 	term = entry.Term
 	return
@@ -232,7 +232,7 @@ func (store *BadgerStorage) idxToKey(idx uint64) []byte {
 
 func (store *BadgerStorage) AppendEntry(entry Entry) error {
 	if store.GetCurrentTerm() == 0 {
-		panic("appending entry when our term is 0")
+		panic("append entry with zero term")
 	}
 
 	lastLogIdx := store.GetLastLogIndex()
@@ -248,7 +248,7 @@ func (store *BadgerStorage) AppendEntry(entry Entry) error {
 		}
 		return nil
 	}); err != nil {
-		panic(err)
+		panic(fmt.Errorf("failed to append entry: %w", err))
 	}
 
 	// update lastLogIdx
@@ -260,18 +260,18 @@ func (store *BadgerStorage) AppendEntry(entry Entry) error {
 func (store *BadgerStorage) VoteFor(id string, currentTerm uint64) {
 	storedCurrentTerm := store.GetCurrentTerm()
 	if storedCurrentTerm != currentTerm {
-		panic(fmt.Sprintf("tried to vote for term %d, but current term is %d", currentTerm, storedCurrentTerm))
+		panic(fmt.Errorf("unexpected term during vote commit"))
 	}
 
 	storedVote := store.GetVotedFor()
 	if storedVote != "" {
-		panic(fmt.Sprintf("tried to vote for %s but already voted for %s", id, storedVote))
+		panic(fmt.Errorf("already voted in this term"))
 	}
 
 	if err := store.db.Update(func(txn *badger.Txn) error {
 		return txn.Set(VoteKey, []byte(id))
 	}); err != nil {
-		panic("failed to update voted for")
+		panic(fmt.Errorf("failed to update vote: %w", err))
 	}
 }
 
@@ -296,7 +296,7 @@ func (store *BadgerStorage) GetLogEntriesFrom(startingLogIdx uint64) []Entry {
 		return nil
 	})
 	if err != nil {
-		panic(err)
+		panic(fmt.Errorf("failed to get entries: %w", err))
 	}
 	return entries
 }
@@ -314,7 +314,7 @@ func (store *BadgerStorage) GetVotedFor() string {
 		})
 		return nil
 	}); err != nil {
-		panic(fmt.Sprintf("failed to read voted: %s", err))
+		panic(fmt.Errorf("failed to load vote: %w", err))
 	}
 
 	return votedFor
@@ -330,7 +330,7 @@ func (store *BadgerStorage) SetTerm(term uint64) {
 	if currentTerm == 0 && term == 0 {
 		// initial case, don't panic
 	} else if term <= currentTerm {
-		panic(fmt.Sprintf("attempted to set term to %d when it was %d", term, store.GetCurrentTerm()))
+		panic(fmt.Errorf("attempting to decrease term"))
 	}
 
 	buf := make([]byte, 8)
@@ -345,7 +345,7 @@ func (store *BadgerStorage) SetTerm(term uint64) {
 		}
 		return nil
 	}); err != nil {
-		panic(err)
+		panic(fmt.Errorf("failed to commit new term and clear vote: %w", err))
 	}
 }
 
