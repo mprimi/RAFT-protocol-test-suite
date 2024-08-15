@@ -117,13 +117,13 @@ func TestRaftStepDownDueToHigherTerm(t *testing.T) {
 			10,
 			100,
 			Candidate,
-			"follower with term 10 receives vote request with term 100, should stepdown",
+			"candidate with term 10 receives vote request with term 100, should stepdown",
 		},
 		{
 			10,
 			100,
 			Leader,
-			"follower with term 10 receives vote request with term 100, should stepdown",
+			"leader with term 10 receives vote request with term 100, should stepdown",
 		},
 	}
 
@@ -155,6 +155,7 @@ func TestRaftStepDownDueToHigherTerm(t *testing.T) {
 				raftNode.voteMap = make(map[string]bool)
 			case Leader:
 				raftNode.followersStateMap = make(map[string]*FollowerState)
+				raftNode.acceptingProposals.Store(true)
 			}
 
 			if c.initialTerm > 0 {
