@@ -157,7 +157,7 @@ func (rn *RaftNodeImpl) processOneTransistion() {
 }
 
 func (rn *RaftNodeImpl) processOneTransistionInternal(inactivityTimeout time.Duration) {
-	
+
 	select {
 	case proposal := <-rn.inboundProposals:
 		// consume proposal
@@ -222,7 +222,7 @@ func (rn *RaftNodeImpl) processOneTransistionInternal(inactivityTimeout time.Dur
 	case <-rn.sendAppendEntriesTicker.C:
 		// Only ticks if this node is leader
 		// May send/resend append entries request and/or heartbeats
-		rn.checkFollowers()
+		rn.maybeSendAppendEntriesToFollowers()
 
 	case <-time.After(inactivityTimeout):
 		// inactivity
@@ -235,7 +235,7 @@ func (rn *RaftNodeImpl) isKnownPeer(peerId string) bool {
 }
 
 func (rn *RaftNodeImpl) ascendToLeader() {
-	// guard:
+	// guard: node should transition to leader iff it was a candidate before
 	if rn.state != Candidate {
 		assert.Unreachable(
 			"Transitioning to leader when not candidate",
@@ -245,45 +245,40 @@ func (rn *RaftNodeImpl) ascendToLeader() {
 		)
 		panic(fmt.Errorf("transition to leader from state %s", rn.state))
 	}
-	// guard:
+
+	// guard: followers map should not exist before node becomes leader
 	if rn.followersStateMap != nil {
 		panic(fmt.Errorf("followersStateMap is not nil during leader transition"))
 	}
 
 	rn.Log("ascending to leader")
 
-	// transistion to leader
+	// Set state
 	rn.state = Leader
-	// clear vote map
+	// Clear vote map, a 'candidate' state construct
 	rn.voteMap = nil
-	// stop voteResponseTimeoutTimer
+	// Stop voteResponseTimeoutTimer, only relevant when 'candidate'
 	stopAndDrainTimer(rn.voteResponseTimeoutTimer)
-	// stop electionTimeoutTimer
+	// Stop electionTimeoutTimer, only relevant if 'candidate' or 'follower'
 	stopAndDrainTimer(rn.electionTimeoutTimer)
 
-	rn.followersStateMap = make(map[string]*FollowerState, len(rn.peers))
-	for peerId := range rn.peers {
-		rn.followersStateMap[peerId] = &FollowerState{
-			nextIndex:  rn.storage.GetLastLogIndex() + 1,
-			matchIndex: 0,
-		}
-	}
-
-	swapped := rn.acceptingProposals.CompareAndSwap(false, true)
-	// guard:
-	if !swapped {
+	// Open the gate to accept proposals (via proposal channel, this is not a lock)
+	wasAcceptingProposals := rn.acceptingProposals.CompareAndSwap(false, true)
+	// guard: check that node was not accepting proposals before becoming leader
+	if !wasAcceptingProposals {
 		panic(fmt.Errorf("accepting proposals before being leader"))
 	}
 
-	// leader state is initialized
+	// Prepare to send a first empty AppendEntry request to all followers.
+	// This step is necessary to properly set followers match & next indices, which now are just an optimistic guess.
 
-	// find term for last log entry, if no entries exist then 0
 	var prevLogTerm = NoPreviousTerm
-	prevLogIdx := rn.storage.GetLastLogIndex()
-	// log is not empty
+	var prevLogIdx = rn.storage.GetLastLogIndex()
+
+	// If log is not empty, find the term for the last entry (at prevLogIdx)
 	if prevLogIdx > 0 {
 		lastLogEntry, exists := rn.storage.GetLogEntry(prevLogIdx)
-		// guard:
+		// guard: entry at last log index should exist
 		if !exists {
 			assert.Unreachable(
 				"Failed to look up last log entry",
@@ -293,10 +288,11 @@ func (rn *RaftNodeImpl) ascendToLeader() {
 			)
 			panic(fmt.Errorf("last log entry does not exist"))
 		}
+		// This is the term to include in the next AE Request
 		prevLogTerm = lastLogEntry.Term
 	}
 
-	// broadcast initial empty AppendEntriesRequest to peers
+	// Compose and broadcast the empty AE to all followers
 	newLeaderAEReq := &AppendEntriesRequest{
 		Term:            rn.storage.GetCurrentTerm(),
 		LeaderId:        rn.id,
@@ -306,21 +302,24 @@ func (rn *RaftNodeImpl) ascendToLeader() {
 		LeaderCommitIdx: rn.commitIndex,
 	}
 	rn.BroadcastMessage(newLeaderAEReq)
-	rn.Log("broadcasted first AE requests, after becoming Leader, to followers")
+	rn.Log("broadcast first empty AE requests to followers")
 
-	for _, followerState := range rn.followersStateMap {
-		followerState.aeTimestamp = time.Now()
-		followerState.waitingForAEResponse = true
+	// After sending it, mark down the time it was sent
+	now := time.Now()
+
+	// And initialize the followers state
+	rn.followersStateMap = make(map[string]*FollowerState, len(rn.peers))
+	for peerId := range rn.peers {
+		rn.followersStateMap[peerId] = &FollowerState{
+			nextIndex:            rn.storage.GetLastLogIndex() + 1,
+			matchIndex:           0,
+			waitingForAEResponse: true,
+			aeTimestamp:          now,
+		}
 	}
 
+	// Start the ticker that periodically checks for AE responses timeout and re-sends them as necessary
 	resetAndDrainTicker(rn.sendAppendEntriesTicker, aeResponseTimeoutDuration)
-}
-
-// sends message, sets ae timestamp to now and sets waiting for response to true
-func (rn *RaftNodeImpl) sendNewAppendEntryRequest(aeReq *AppendEntriesRequest, followerId string, followerState *FollowerState) {
-	rn.SendMessage(followerId, aeReq)
-	followerState.aeTimestamp = time.Now()
-	followerState.waitingForAEResponse = true
 }
 
 func (rn *RaftNodeImpl) convertToCandidate() {
@@ -806,14 +805,20 @@ func (rn *RaftNodeImpl) handleAppendEntriesResponse(appendEntriesResponse *Appen
 		}
 
 		entries := rn.entriesToSendToFollower(appendEntriesResponse.ResponderId)
-		rn.sendNewAppendEntryRequest(&AppendEntriesRequest{
-			Term:            currentTerm,
-			LeaderId:        rn.id,
-			Entries:         entries,
-			PrevLogIdx:      prevLogIndex,
-			PrevLogTerm:     prevLogTerm,
-			LeaderCommitIdx: rn.commitIndex,
-		}, appendEntriesResponse.ResponderId, followerState)
+
+		rn.SendMessage(
+			appendEntriesResponse.ResponderId,
+			&AppendEntriesRequest{
+				Term:            currentTerm,
+				LeaderId:        rn.id,
+				Entries:         entries,
+				PrevLogIdx:      prevLogIndex,
+				PrevLogTerm:     prevLogTerm,
+				LeaderCommitIdx: rn.commitIndex,
+			},
+		)
+		followerState.aeTimestamp = time.Now()
+		followerState.waitingForAEResponse = true
 	}
 
 	// commit index only is incremented if matchIndex has been changed
@@ -980,8 +985,8 @@ func (rn *RaftNodeImpl) handleVoteResponse(voteResponse *VoteResponse) {
 	}
 }
 
-func (rn *RaftNodeImpl) checkFollowers() {
-	// guard:
+func (rn *RaftNodeImpl) maybeSendAppendEntriesToFollowers() {
+	// guard: this is expected to be invoked only by a node in leader state
 	if rn.state != Leader {
 		panic(fmt.Errorf("send append entries tick in state %s", rn.state))
 	}
@@ -989,22 +994,31 @@ func (rn *RaftNodeImpl) checkFollowers() {
 	currentTerm := rn.storage.GetCurrentTerm()
 
 	for followerId, followerState := range rn.followersStateMap {
+		// Check whether it's time to send another AE Request to this follower based on whether they are
+		// expected to respond to a previous one, or just waiting for the next AE/Heartbeat
 		var d time.Duration
-		var aeReqType string
+		var reason string
 		if followerState.waitingForAEResponse {
 			d = aeResponseTimeoutDuration
-			aeReqType = "retry append entries request"
+			reason = "previous response timed out"
 		} else {
 			d = heartbeatInterval
-			aeReqType = "heartbeat"
+			reason = "time to heartbeat"
 		}
 
+		// Is it time to send another request to this follower?
 		if time.Since(followerState.aeTimestamp) > d {
+			rn.Log("Composing AERequest for %d (reason: %s)", followerId, reason)
+
+			// Choose previous log index and corresponding term for this follower consistency check portion of the
+			// AE Request
 			var prevLogTerm = NoPreviousTerm
 			prevLogIndex := followerState.nextIndex - 1
+
 			if prevLogIndex > 0 {
+				// Unless sending from the start of the log, look up the term for the last matching index
 				prevLogEntry, exists := rn.storage.GetLogEntry(prevLogIndex)
-				// guard:
+				// guard: if looking up an entry, make sure it exists
 				if !exists {
 					assert.Unreachable(
 						"Load entry that does not exist",
@@ -1017,19 +1031,26 @@ func (rn *RaftNodeImpl) checkFollowers() {
 					)
 					panic(fmt.Errorf("attempting to load non-existent entry"))
 				}
+				// Save the term for this entry
 				prevLogTerm = prevLogEntry.Term
 			}
 
+			// Load entries (if any) for this follower starting at match index + 1
 			entriesToSend := rn.entriesToSendToFollower(followerId)
-			rn.sendNewAppendEntryRequest(&AppendEntriesRequest{
-				Term:            currentTerm,
-				LeaderId:        rn.id,
-				Entries:         entriesToSend,
-				PrevLogIdx:      prevLogIndex,
-				PrevLogTerm:     prevLogTerm,
-				LeaderCommitIdx: rn.commitIndex,
-			}, followerId, followerState)
-			rn.Log("sent %s to %s", aeReqType, followerId)
+
+			rn.SendMessage(
+				followerId,
+				&AppendEntriesRequest{
+					Term:            currentTerm,
+					LeaderId:        rn.id,
+					Entries:         entriesToSend,
+					PrevLogIdx:      prevLogIndex,
+					PrevLogTerm:     prevLogTerm,
+					LeaderCommitIdx: rn.commitIndex,
+				},
+			)
+			followerState.aeTimestamp = time.Now()
+			followerState.waitingForAEResponse = true
 		}
 	}
 }
