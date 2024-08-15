@@ -25,6 +25,9 @@ const (
 	maxElectionTimeout             time.Duration = 6 * time.Second
 	minElectionTimeout             time.Duration = 5 * time.Second
 	initialElectionTimeoutDuration time.Duration = 1 * time.Second
+
+	// NoPreviousTerm Used in AppendEntriesRequest to denote a "null" consistency check
+	NoPreviousTerm = uint64(0)
 )
 
 type RaftOperation interface {
@@ -187,7 +190,14 @@ func (rn *RaftNodeImpl) processOneTransistionInternal(inactivityTimeout time.Dur
 		switch opType {
 		case AppendEntriesRequestOp:
 			appendEntriesRequest := message.(*AppendEntriesRequest)
-			rn.Log("received AppendEntries request from %s, leader term: %d, prevLogIdx: %d, prevLogTerm: %d, leaderCommitIdx: %d", appendEntriesRequest.LeaderId, appendEntriesRequest.Term, appendEntriesRequest.PrevLogIdx, appendEntriesRequest.PrevLogTerm, appendEntriesRequest.LeaderCommitIdx)
+			rn.Log(
+				"received AppendEntries request from %s, leader term: %d, prevLogIdx: %d, prevLogTerm: %d, leaderCommitIdx: %d",
+				appendEntriesRequest.LeaderId,
+				appendEntriesRequest.Term,
+				appendEntriesRequest.PrevLogIdx,
+				appendEntriesRequest.PrevLogTerm,
+				appendEntriesRequest.LeaderCommitIdx,
+			)
 
 			// peer is unknown, ignore request
 			if !rn.isKnownPeer(appendEntriesRequest.LeaderId) {
@@ -224,8 +234,28 @@ func (rn *RaftNodeImpl) processOneTransistionInternal(inactivityTimeout time.Dur
 				rn.stepdown()
 			}
 
+			// guard:
+			if appendEntriesRequest.PrevLogIdx > 0 && appendEntriesRequest.PrevLogTerm == NoPreviousTerm {
+				// Request is invalid, leader should never send such a thing
+				assert.Unreachable(
+					"Invalid request consistency check values",
+					map[string]any{
+						"leader":      appendEntriesRequest.LeaderId,
+						"term":        appendEntriesRequest.Term,
+						"prevLogIdx":  appendEntriesRequest.PrevLogIdx,
+						"prevLogTerm": appendEntriesRequest.PrevLogTerm,
+					},
+				)
+				rn.Log(
+					"Leader sent invalid AERequest with PrevLogIdx: %d and PrevLogTerm: %d, ignoring",
+					appendEntriesRequest.PrevLogIdx,
+					appendEntriesRequest.PrevLogTerm,
+				)
+				return
+			}
+
 			// check if log state is consistent with leader
-			if appendEntriesRequest.PrevLogIdx > 0 {
+			if appendEntriesRequest.PrevLogTerm != NoPreviousTerm {
 				// no entry exists
 				entry, exists := rn.storage.GetLogEntry(appendEntriesRequest.PrevLogIdx)
 				if !exists {
@@ -418,20 +448,24 @@ func (rn *RaftNodeImpl) processOneTransistionInternal(inactivityTimeout time.Dur
 				}
 
 				prevLogIndex := followerState.nextIndex - 1
-				prevLogEntry, exists := rn.storage.GetLogEntry(prevLogIndex)
-				// guard:
-				if !exists {
-					assert.Unreachable(
-						"Entry for follower does not exist",
-						map[string]any{
-							"followerResponder":    appendEntriesResponse.ResponderId,
-							"followerState":        followerState,
-							"aeResponseMatchIndex": appendEntriesResponse.MatchIndex,
-							"aeResponseTerm":       appendEntriesResponse.Term,
-							"prevLogIndex":         prevLogIndex,
-						},
-					)
-					panic(fmt.Errorf("log entry does not exist"))
+				prevLogTerm := NoPreviousTerm
+				if prevLogIndex > 0 {
+					prevLogEntry, exists := rn.storage.GetLogEntry(prevLogIndex)
+					// guard:
+					if !exists {
+						assert.Unreachable(
+							"Entry for follower does not exist",
+							map[string]any{
+								"followerResponder":    appendEntriesResponse.ResponderId,
+								"followerState":        followerState,
+								"aeResponseMatchIndex": appendEntriesResponse.MatchIndex,
+								"aeResponseTerm":       appendEntriesResponse.Term,
+								"prevLogIndex":         prevLogIndex,
+							},
+						)
+						panic(fmt.Errorf("log entry does not exist"))
+					}
+					prevLogTerm = prevLogEntry.Term
 				}
 
 				entries := rn.entriesToSendToFollower(appendEntriesResponse.ResponderId)
@@ -440,7 +474,7 @@ func (rn *RaftNodeImpl) processOneTransistionInternal(inactivityTimeout time.Dur
 					LeaderId:        rn.id,
 					Entries:         entries,
 					PrevLogIdx:      prevLogIndex,
-					PrevLogTerm:     prevLogEntry.Term,
+					PrevLogTerm:     prevLogTerm,
 					LeaderCommitIdx: rn.commitIndex,
 				}, appendEntriesResponse.ResponderId, followerState)
 			}
@@ -642,11 +676,9 @@ func (rn *RaftNodeImpl) processOneTransistionInternal(inactivityTimeout time.Dur
 			}
 
 			if time.Since(followerState.aeTimestamp) > d {
-				var prevLogTerm uint64
+				var prevLogTerm = NoPreviousTerm
 				prevLogIndex := followerState.nextIndex - 1
-				if prevLogIndex == 0 {
-					prevLogTerm = 0
-				} else {
+				if prevLogIndex > 0 {
 					prevLogEntry, exists := rn.storage.GetLogEntry(prevLogIndex)
 					// guard:
 					if !exists {
@@ -731,7 +763,7 @@ func (rn *RaftNodeImpl) ascendToLeader() {
 	// leader state is initialized
 
 	// find term for last log entry, if no entries exist then 0
-	var prevLogTerm uint64 = 0
+	var prevLogTerm = NoPreviousTerm
 	prevLogIdx := rn.storage.GetLastLogIndex()
 	// log is not empty
 	if prevLogIdx > 0 {
@@ -963,6 +995,9 @@ func (rn *RaftNodeImpl) BroadcastMessage(msg RaftOperation) {
 }
 
 func (rn *RaftNodeImpl) SendMessage(peerId string, msg RaftOperation) {
+	//TODO add some guards to validate outbound messages:
+	// e.g.: AppendEntryRequest
+	//         - IFF previousLogIndex > 0 then PreviousLogTerm != 0
 	opType := msg.OpType()
 	msgEnvelope := Envelope{
 		OperationType: opType,

@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"testing"
 	"time"
+
 	"toy-raft/network"
 )
 
@@ -439,7 +440,7 @@ func TestAscendToLeadership(t *testing.T) {
 		LeaderId:        id,
 		Entries:         []Entry{},
 		PrevLogIdx:      0,
-		PrevLogTerm:     0,
+		PrevLogTerm:     NoPreviousTerm,
 		LeaderCommitIdx: 0,
 	}
 	opType, message, err = parseMessage(dummyNetwork.lastMessageBroadcasted)
@@ -516,7 +517,7 @@ func TestFollowerHandleAppendEntries(t *testing.T) {
 			LeaderId:        leaderId,
 			Entries:         []Entry{},
 			PrevLogIdx:      0,
-			PrevLogTerm:     0,
+			PrevLogTerm:     NoPreviousTerm,
 			LeaderCommitIdx: 0,
 		})
 		appendEntriesResponse = getAppendEntriesResponse()
@@ -737,7 +738,7 @@ func TestFollowerHandleAppendEntries(t *testing.T) {
 			LeaderId:        leaderId,
 			Entries:         []Entry{},
 			PrevLogIdx:      0,
-			PrevLogTerm:     0,
+			PrevLogTerm:     NoPreviousTerm,
 			LeaderCommitIdx: 0,
 		})
 		// check that it sent a successful response
@@ -759,7 +760,7 @@ func TestFollowerHandleAppendEntries(t *testing.T) {
 			LeaderId:        "unknown",
 			Entries:         []Entry{},
 			PrevLogIdx:      0,
-			PrevLogTerm:     0,
+			PrevLogTerm:     NoPreviousTerm,
 			LeaderCommitIdx: 0,
 		})
 		// check that it ignored it by not sending a response
