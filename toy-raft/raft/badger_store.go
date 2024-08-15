@@ -272,6 +272,7 @@ func (store *BadgerStorage) idxToKey(idx uint64) []byte {
 	return []byte(fmt.Sprintf("%d", idx))
 }
 
+// TODO should return index so caller can check it matches expected (alternatively, pass in the expected index)
 func (store *BadgerStorage) AppendEntry(entry Entry) error {
 	if store.GetCurrentTerm() == 0 {
 		assert.Unreachable(
