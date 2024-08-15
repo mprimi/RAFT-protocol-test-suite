@@ -1062,6 +1062,8 @@ func TestHandleAppendEntriesResponse(t *testing.T) {
 	t.Run("stepdown", func(t *testing.T) {
 		initialTerm := uint64(1)
 		raftNode = createRaftNode(id, initialTerm, Leader, []*Entry{})
+		raftNode.acceptingProposals.Store(true)
+		raftNode.followersStateMap = make(map[string]*FollowerState)
 
 		responseTerm := initialTerm + 100
 		sendAppendEntriesResponse(&AppendEntriesResponse{
