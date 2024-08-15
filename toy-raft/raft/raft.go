@@ -157,9 +157,7 @@ func (rn *RaftNodeImpl) processOneTransistion() {
 }
 
 func (rn *RaftNodeImpl) processOneTransistionInternal(inactivityTimeout time.Duration) {
-	// get current term before we process a message
-	currentTerm := rn.storage.GetCurrentTerm()
-
+	
 	select {
 	case proposal := <-rn.inboundProposals:
 		// consume proposal
@@ -189,456 +187,19 @@ func (rn *RaftNodeImpl) processOneTransistionInternal(inactivityTimeout time.Dur
 
 		switch opType {
 		case AppendEntriesRequestOp:
-			appendEntriesRequest := message.(*AppendEntriesRequest)
-			rn.Log(
-				"received AppendEntries request from %s, leader term: %d, prevLogIdx: %d, prevLogTerm: %d, leaderCommitIdx: %d",
-				appendEntriesRequest.LeaderId,
-				appendEntriesRequest.Term,
-				appendEntriesRequest.PrevLogIdx,
-				appendEntriesRequest.PrevLogTerm,
-				appendEntriesRequest.LeaderCommitIdx,
-			)
-
-			// peer is unknown, ignore request
-			if !rn.isKnownPeer(appendEntriesRequest.LeaderId) {
-				rn.Log("ignoring AppendEntries request from unknown peer: %s", appendEntriesRequest.LeaderId)
-				return
-			}
-
-			// request has higher term, stepdown and update term
-			if appendEntriesRequest.Term > currentTerm {
-				rn.Log("stepping down and updating term (currentTerm: %d -> requestTerm: %d) due to AppendEntries request having a higher term", currentTerm, appendEntriesRequest.Term)
-				// set new term to append entries request term
-				rn.stepdownDueToHigherTerm(appendEntriesRequest.Term)
-				// refresh value
-				currentTerm = rn.storage.GetCurrentTerm()
-			}
-
-			resp := &AppendEntriesResponse{
-				Term:        currentTerm,
-				Success:     false,
-				ResponderId: rn.id,
-				MatchIndex:  0,
-			}
-
-			// request's term is lower than current term, deny request
-			if appendEntriesRequest.Term < currentTerm {
-				rn.SendMessage(appendEntriesRequest.LeaderId, resp)
-				return
-			} else if rn.state == Follower {
-				// refresh election timer
-				// NOTE: any state can receive an AE req, but the timer should only be reset for a follower
-				resetAndDrainTimer(rn.electionTimeoutTimer, randomTimerDuration(minElectionTimeout, maxElectionTimeout))
-			} else if rn.state == Candidate {
-				// stepdown if a leader with the same term as us is found
-				rn.stepdown()
-			}
-
-			// guard:
-			if appendEntriesRequest.PrevLogIdx > 0 && appendEntriesRequest.PrevLogTerm == NoPreviousTerm {
-				// Request is invalid, leader should never send such a thing
-				assert.Unreachable(
-					"Invalid request consistency check values",
-					map[string]any{
-						"leader":      appendEntriesRequest.LeaderId,
-						"term":        appendEntriesRequest.Term,
-						"prevLogIdx":  appendEntriesRequest.PrevLogIdx,
-						"prevLogTerm": appendEntriesRequest.PrevLogTerm,
-					},
-				)
-				rn.Log(
-					"Leader sent invalid AERequest with PrevLogIdx: %d and PrevLogTerm: %d, ignoring",
-					appendEntriesRequest.PrevLogIdx,
-					appendEntriesRequest.PrevLogTerm,
-				)
-				return
-			}
-
-			// check if log state is consistent with leader
-			if appendEntriesRequest.PrevLogTerm != NoPreviousTerm {
-				// no entry exists
-				entry, exists := rn.storage.GetLogEntry(appendEntriesRequest.PrevLogIdx)
-				if !exists {
-					rn.Log("found non-existent log entry at index %d when comparing with leader", appendEntriesRequest.PrevLogIdx)
-					resp.Success = false
-					rn.SendMessage(appendEntriesRequest.LeaderId, resp)
-					return
-				} else if entry.Term != appendEntriesRequest.PrevLogTerm {
-					rn.Log("discovered log inconsistency with leader at index %d, expected term %d, got term %d", appendEntriesRequest.PrevLogIdx, appendEntriesRequest.PrevLogTerm, entry.Term)
-					resp.Success = false
-					rn.SendMessage(appendEntriesRequest.LeaderId, resp)
-					return
-				}
-			}
-
-			// append entries from request
-			logEntryToBeAddedIdx := appendEntriesRequest.PrevLogIdx + 1
-			rn.Log("attempting to add %d entries to log starting at index %d", len(appendEntriesRequest.Entries), logEntryToBeAddedIdx)
-			for i, entry := range appendEntriesRequest.Entries {
-				logEntry, exists := rn.storage.GetLogEntry(logEntryToBeAddedIdx)
-				if !exists {
-					rn.Log("appending entry %d/%d (%+v) at index %d", i+1, len(appendEntriesRequest.Entries), entry, logEntryToBeAddedIdx)
-					rn.storage.AppendEntry(entry)
-				} else if entry.Term != logEntry.Term {
-					rn.Log("deleting entries from index %d", logEntryToBeAddedIdx)
-					rn.storage.DeleteEntriesFrom(logEntryToBeAddedIdx)
-					rn.Log("appending entry %d/%d (%+v) at index %d", i+1, len(appendEntriesRequest.Entries), entry, logEntryToBeAddedIdx)
-					rn.storage.AppendEntry(entry)
-				} else {
-					rn.Log("entry %d/%d, already exists at index %d", i+1, len(appendEntriesRequest.Entries), logEntryToBeAddedIdx)
-				}
-				logEntryToBeAddedIdx++
-			}
-
-			// update commit index
-			indexOfLastNewEntry := appendEntriesRequest.PrevLogIdx + uint64(len(appendEntriesRequest.Entries))
-			if appendEntriesRequest.LeaderCommitIdx > rn.commitIndex {
-				prevCommitIndex := rn.commitIndex
-				rn.commitIndex = min(appendEntriesRequest.LeaderCommitIdx, indexOfLastNewEntry)
-				// guard: commit index should only increase monotonically
-				if rn.commitIndex < prevCommitIndex {
-					assert.Unreachable(
-						"Non monotonic commit index",
-						map[string]any{
-							"commitIndex":          rn.commitIndex,
-							"prevCommitIndex":      prevCommitIndex,
-							"aeRequestCommitIndex": appendEntriesRequest.LeaderCommitIdx,
-							"indexOfLastNewEntry":  indexOfLastNewEntry,
-							"aeRequestSender":      appendEntriesRequest.LeaderId,
-							"aeRequestTerm":        appendEntriesRequest.Term,
-						},
-					)
-					panic(fmt.Errorf("attempting to decrease commit index"))
-				}
-			}
-
-			resp.Success = true
-			resp.MatchIndex = appendEntriesRequest.PrevLogIdx + uint64(len(appendEntriesRequest.Entries))
-
-			rn.SendMessage(appendEntriesRequest.LeaderId, resp)
-
-			// guard:
-			if rn.commitIndex > rn.storage.GetLastLogIndex() {
-				assert.Unreachable(
-					"Commit index points to entries not in log",
-					map[string]any{
-						"commitIndex":          rn.commitIndex,
-						"lastLogIndex":         rn.storage.GetLastLogIndex(),
-						"aeRequestCommitIndex": appendEntriesRequest.LeaderCommitIdx,
-						"indexOfLastNewEntry":  indexOfLastNewEntry,
-						"aeRequestSender":      appendEntriesRequest.LeaderId,
-						"aeRequestTerm":        appendEntriesRequest.Term,
-					},
-				)
-				panic(fmt.Errorf("attempting to set commit index beyond last log index"))
-			}
-
-			// apply newly committed entries
-			for i := rn.lastApplied + 1; i <= rn.commitIndex; i++ {
-				entry, exists := rn.storage.GetLogEntry(i)
-				// guard:
-				if !exists || entry == nil {
-					assert.Unreachable(
-						"Commit index points to entries not in log",
-						map[string]any{
-							"lastApplied":          rn.lastApplied,
-							"i":                    i,
-							"entryExists":          exists,
-							"entryIsNil":           entry == nil,
-							"lastLogIndex":         rn.storage.GetLastLogIndex(),
-							"aeRequestCommitIndex": appendEntriesRequest.LeaderCommitIdx,
-							"indexOfLastNewEntry":  indexOfLastNewEntry,
-							"aeRequestSender":      appendEntriesRequest.LeaderId,
-							"aeRequestTerm":        appendEntriesRequest.Term,
-						},
-					)
-					panic(fmt.Errorf("attempting to apply entry that is not in log"))
-				}
-				rn.Log("applying entry %d to state machine", i)
-				rn.applyUpdate(entry)
-			}
-			rn.lastApplied = rn.commitIndex
+			rn.handleAppendEntriesRequest(message.(*AppendEntriesRequest))
 
 		case AppendEntriesResponseOp:
-			appendEntriesResponse := message.(*AppendEntriesResponse)
-			rn.Log("received append entries response from %s", appendEntriesResponse.ResponderId)
-
-			if !rn.isKnownPeer(appendEntriesResponse.ResponderId) {
-				rn.Log("ignoring append entries response from unknown peer: %s", appendEntriesResponse.ResponderId)
-				return
-			}
-
-			if appendEntriesResponse.Term > currentTerm {
-				// set new term to vote request term
-				rn.Log("append entries response with a higher term: %d", appendEntriesResponse.Term)
-				rn.stepdownDueToHigherTerm(appendEntriesResponse.Term)
-				return
-			}
-
-			if rn.state != Leader {
-				rn.Log("ignoring append entries response as not leader")
-				return
-			}
-
-			if appendEntriesResponse.Term < currentTerm {
-				rn.Log("ignoring append entries response with a lower term: %d", appendEntriesResponse.Term)
-				return
-			}
-
-			followerState, exists := rn.followersStateMap[appendEntriesResponse.ResponderId]
-			// guard:
-			if !exists {
-				assert.Unreachable(
-					"Peer not present in followers map",
-					map[string]any{
-						"peers":             maps.Keys(rn.peers),
-						"followers":         maps.Keys(rn.followersStateMap),
-						"followerResponder": appendEntriesResponse.ResponderId,
-					},
-				)
-				panic(fmt.Errorf("peer is not in followers map"))
-			}
-
-			// successfully received a response from this follower
-			followerState.waitingForAEResponse = false
-
-			matchIndexUpdated := false
-			if appendEntriesResponse.Success {
-				// guard:
-				if appendEntriesResponse.MatchIndex < followerState.matchIndex {
-					assert.Unreachable(
-						"Match index in response is lower than expected",
-						map[string]any{
-							"aeResponseMatchIndex": appendEntriesResponse.MatchIndex,
-							"followerMatchIndex":   followerState.matchIndex,
-							"followerResponder":    appendEntriesResponse.ResponderId,
-							"followerState":        followerState,
-						},
-					)
-					panic(fmt.Errorf("match index lower than follower match index"))
-				} else if followerState.matchIndex == appendEntriesResponse.MatchIndex {
-					// match index didn't change
-				} else {
-					matchIndexUpdated = true
-					followerState.matchIndex = appendEntriesResponse.MatchIndex
-					followerState.nextIndex = followerState.matchIndex + 1
-				}
-			} else {
-				// NOTE: this only executes if log doesn't match
-
-				// minimum next index is 1
-				if followerState.nextIndex > 1 {
-					followerState.nextIndex -= 1
-				}
-
-				// guard:
-				if followerState.nextIndex <= followerState.matchIndex {
-					// TODO maybe should consider this request invalid and ignore it?
-					// TODO maybe should add this guard before sending the response
-					assert.Unreachable(
-						"Invalid follower state, nextIndex is not greater than matchIndex",
-						map[string]any{
-							"followerResponder":    appendEntriesResponse.ResponderId,
-							"followerState":        followerState,
-							"aeResponseMatchIndex": appendEntriesResponse.MatchIndex,
-							"aeResponseTerm":       appendEntriesResponse.Term,
-						},
-					)
-					panic(fmt.Errorf("follower nextIndex <= matchIndex "))
-				}
-
-				prevLogIndex := followerState.nextIndex - 1
-				prevLogTerm := NoPreviousTerm
-				if prevLogIndex > 0 {
-					prevLogEntry, exists := rn.storage.GetLogEntry(prevLogIndex)
-					// guard:
-					if !exists {
-						assert.Unreachable(
-							"Entry for follower does not exist",
-							map[string]any{
-								"followerResponder":    appendEntriesResponse.ResponderId,
-								"followerState":        followerState,
-								"aeResponseMatchIndex": appendEntriesResponse.MatchIndex,
-								"aeResponseTerm":       appendEntriesResponse.Term,
-								"prevLogIndex":         prevLogIndex,
-							},
-						)
-						panic(fmt.Errorf("log entry does not exist"))
-					}
-					prevLogTerm = prevLogEntry.Term
-				}
-
-				entries := rn.entriesToSendToFollower(appendEntriesResponse.ResponderId)
-				rn.sendNewAppendEntryRequest(&AppendEntriesRequest{
-					Term:            currentTerm,
-					LeaderId:        rn.id,
-					Entries:         entries,
-					PrevLogIdx:      prevLogIndex,
-					PrevLogTerm:     prevLogTerm,
-					LeaderCommitIdx: rn.commitIndex,
-				}, appendEntriesResponse.ResponderId, followerState)
-			}
-
-			// commit index only is incremented if matchIndex has been changed
-			if matchIndexUpdated {
-				// guard:
-				if currentTerm != rn.storage.GetCurrentTerm() {
-					assert.Unreachable(
-						"Unexpected term",
-						map[string]any{
-							"currentTerm": currentTerm,
-							"storedTerm":  rn.storage.GetCurrentTerm(),
-						},
-					)
-					panic(fmt.Errorf("unexpected term change while processing AppendEntriesResponse"))
-				}
-
-				quorum := len(rn.peers)/2 + 1
-				lastLogIndex := rn.storage.GetLastLogIndex()
-
-				upperBound := min(appendEntriesResponse.MatchIndex, lastLogIndex)
-				lowerBound := rn.commitIndex + 1
-
-				for n := upperBound; n >= lowerBound; n-- {
-					logEntry, exists := rn.storage.GetLogEntry(n)
-					// guard:
-					if !exists {
-						assert.Unreachable(
-							"Attempting to load entry that does not exist",
-							map[string]any{
-								"index":        n,
-								"upperBound":   upperBound,
-								"lowerBound":   lowerBound,
-								"lastLogIndex": lastLogIndex,
-							},
-						)
-						panic(fmt.Errorf("attempt to load entry that does not exist"))
-					}
-
-					// NOTE: as an optimization we could just break here since it is guaranteed that all
-					// entries previous to this will have lower terms than us
-					if currentTerm != logEntry.Term {
-						rn.Log("cannot set commitIndex to %d, term mismatch", n)
-						continue
-					}
-					// count how many peer's log matches leader's upto N
-					count := 0
-					for _, followerState := range rn.followersStateMap {
-						if followerState.matchIndex >= n {
-							count++
-						}
-					}
-					// majority of peers has entry[n], commit entries up to N
-					if count >= quorum {
-						rn.commitIndex = n
-						rn.Log("commit index updated to %d", n)
-						break
-					}
-				}
-			}
+			rn.handleAppendEntriesResponse(message.(*AppendEntriesResponse))
 
 		case VoteRequestOp:
-			voteRequest := message.(*VoteRequest)
-			rn.Log("received vote request from %s", voteRequest.CandidateId)
+			rn.handleVoteRequest(message.(*VoteRequest))
 
-			lastLogIndex, lastLogEntryTerm := rn.storage.GetLastLogIndexAndTerm()
-
-			if !rn.isKnownPeer(voteRequest.CandidateId) {
-				rn.Log("ignoring vote request from unknown peer: %s", voteRequest.CandidateId)
-				return
-			}
-
-			if voteRequest.Term > currentTerm {
-				// set new term to vote request term
-				rn.Log("vote request with a higher term, currentTerm: %d, voteRequestTerm: %d", currentTerm, voteRequest.Term)
-				rn.stepdownDueToHigherTerm(voteRequest.Term)
-				// refresh value
-				currentTerm = rn.storage.GetCurrentTerm()
-			}
-
-			var voteGranted bool
-			if voteRequest.Term < currentTerm {
-				rn.Log("vote not granted to %s, voteRequestTerm %d < currentTerm %d", voteRequest.CandidateId, voteRequest.Term, currentTerm)
-				voteGranted = false
-			} else if rn.storage.Voted() && rn.storage.GetVotedFor() != voteRequest.CandidateId {
-				rn.Log("vote not granted to %s, already voted for %s in term %d", voteRequest.CandidateId, rn.storage.GetVotedFor(), rn.storage.GetCurrentTerm())
-				voteGranted = false
-			} else if lastLogEntryTerm > voteRequest.LastLogTerm {
-				rn.Log("vote not granted to %s, lastLogTerm %d > voteRequestLastLogTerm %d", voteRequest.CandidateId, lastLogEntryTerm, voteRequest.LastLogTerm)
-				voteGranted = false
-			} else if lastLogEntryTerm == voteRequest.LastLogTerm && lastLogIndex > voteRequest.LastLogIndex {
-				rn.Log("vote not granted to %s, lastLogIndex %d > voteRequestLastLogIndex %d with same term %d", voteRequest.CandidateId, lastLogIndex, voteRequest.LastLogIndex, lastLogEntryTerm)
-				voteGranted = false
-			} else if rn.storage.Voted() && rn.storage.GetVotedFor() == voteRequest.CandidateId {
-				rn.Log("already voted %s for them in term: %d, granted vote anyway", voteRequest.CandidateId, currentTerm)
-				voteGranted = true
-			} else {
-				rn.Log("granted vote to %s with term %d", voteRequest.CandidateId, voteRequest.Term)
-				voteGranted = true
-				rn.storage.VoteFor(voteRequest.CandidateId, voteRequest.Term)
-			}
-
-			// do not reset timer for useless vote requests
-			// timer will only be running if we are a follower
-			if voteGranted && rn.state == Follower {
-				resetAndDrainTimer(rn.electionTimeoutTimer, randomTimerDuration(minElectionTimeout, maxElectionTimeout))
-			}
-
-			// send vote response to candidate
-			resp := &VoteResponse{
-				Term:        currentTerm,
-				VoteGranted: voteGranted,
-				VoterId:     rn.id,
-			}
-			rn.SendMessage(voteRequest.CandidateId, resp)
 		case VoteResponseOp:
-			voteResponse := message.(*VoteResponse)
+			rn.handleVoteResponse(message.(*VoteResponse))
 
-			if !rn.isKnownPeer(voteResponse.VoterId) {
-				rn.Log("ignoring vote response from unknown peer: %s", voteResponse.VoterId)
-				return
-			}
-
-			currentTerm = rn.storage.GetCurrentTerm()
-			if voteResponse.Term > currentTerm {
-				rn.Log("received vote response with a higher term, voteResponseTerm: %d", voteResponse.Term)
-				rn.stepdownDueToHigherTerm(voteResponse.Term)
-				return
-			} else if voteResponse.Term < currentTerm {
-				rn.Log("ignoring vote response from previous term %d", voteResponse.Term)
-				return
-			} else {
-				rn.Log("received vote response from %s", voteResponse.VoterId)
-			}
-
-			// if we are not candidate, ignore
-			if rn.state != Candidate {
-				rn.Log("ignoring vote response, not a candidate")
-				return
-			}
-
-			if !voteResponse.VoteGranted {
-				rn.Log("voter %s voted no", voteResponse.VoterId)
-				return
-			}
-
-			_, exists := rn.voteMap[voteResponse.VoterId]
-			if exists {
-				rn.Log("received duplicate vote from %s", voteResponse.VoterId)
-				return
-			}
-
-			// add vote to map
-			rn.Log("recording vote from %s", voteResponse.VoterId)
-			rn.voteMap[voteResponse.VoterId] = true
-
-			voteCount := len(rn.voteMap)
-			numPeers := len(rn.peers)
-
-			// majority
-			if voteCount >= (numPeers/2)+1 {
-				rn.ascendToLeader()
-			}
+		default:
+			rn.Log("unknown operation type %d", opType)
 
 		}
 
@@ -659,55 +220,9 @@ func (rn *RaftNodeImpl) processOneTransistionInternal(inactivityTimeout time.Dur
 		rn.convertToCandidate()
 
 	case <-rn.sendAppendEntriesTicker.C:
-		// guard:
-		if rn.state != Leader {
-			panic(fmt.Errorf("send append entries tick in state %s", rn.state))
-		}
-
-		for followerId, followerState := range rn.followersStateMap {
-			var d time.Duration
-			var aeReqType string
-			if followerState.waitingForAEResponse {
-				d = aeResponseTimeoutDuration
-				aeReqType = "retry append entries request"
-			} else {
-				d = heartbeatInterval
-				aeReqType = "heartbeat"
-			}
-
-			if time.Since(followerState.aeTimestamp) > d {
-				var prevLogTerm = NoPreviousTerm
-				prevLogIndex := followerState.nextIndex - 1
-				if prevLogIndex > 0 {
-					prevLogEntry, exists := rn.storage.GetLogEntry(prevLogIndex)
-					// guard:
-					if !exists {
-						assert.Unreachable(
-							"Load entry that does not exist",
-							map[string]any{
-								"followerId":    followerId,
-								"followerState": followerState,
-								"index":         prevLogIndex,
-								"lastLogIndex":  rn.storage.GetLastLogIndex(),
-							},
-						)
-						panic(fmt.Errorf("attempting to load non-existent entry"))
-					}
-					prevLogTerm = prevLogEntry.Term
-				}
-
-				entriesToSend := rn.entriesToSendToFollower(followerId)
-				rn.sendNewAppendEntryRequest(&AppendEntriesRequest{
-					Term:            currentTerm,
-					LeaderId:        rn.id,
-					Entries:         entriesToSend,
-					PrevLogIdx:      prevLogIndex,
-					PrevLogTerm:     prevLogTerm,
-					LeaderCommitIdx: rn.commitIndex,
-				}, followerId, followerState)
-				rn.Log("sent %s to %s", aeReqType, followerId)
-			}
-		}
+		// Only ticks if this node is leader
+		// May send/resend append entries request and/or heartbeats
+		rn.checkFollowers()
 
 	case <-time.After(inactivityTimeout):
 		// inactivity
@@ -1014,6 +529,509 @@ func (rn *RaftNodeImpl) entriesToSendToFollower(followerId string) []Entry {
 		return rn.storage.GetLogEntriesFrom(rn.followersStateMap[followerId].nextIndex)
 	}
 	return []Entry{}
+}
+
+func (rn *RaftNodeImpl) handleAppendEntriesRequest(appendEntriesRequest *AppendEntriesRequest) {
+	// get current term before we process a message
+	currentTerm := rn.storage.GetCurrentTerm()
+
+	// peer is unknown, ignore request
+	if !rn.isKnownPeer(appendEntriesRequest.LeaderId) {
+		rn.Log("ignoring AppendEntries request from unknown peer: %s", appendEntriesRequest.LeaderId)
+		return
+	}
+
+	// request has higher term, stepdown and update term
+	if appendEntriesRequest.Term > currentTerm {
+		rn.Log("stepping down and updating term (currentTerm: %d -> requestTerm: %d) due to AppendEntries request having a higher term", currentTerm, appendEntriesRequest.Term)
+		// set new term to append entries request term
+		rn.stepdownDueToHigherTerm(appendEntriesRequest.Term)
+		// refresh value
+		currentTerm = rn.storage.GetCurrentTerm()
+	}
+
+	resp := &AppendEntriesResponse{
+		Term:        currentTerm,
+		Success:     false,
+		ResponderId: rn.id,
+		MatchIndex:  0,
+	}
+
+	// request's term is lower than current term, deny request
+	if appendEntriesRequest.Term < currentTerm {
+		rn.SendMessage(appendEntriesRequest.LeaderId, resp)
+		return
+	} else if rn.state == Follower {
+		// refresh election timer
+		// NOTE: any state can receive an AE req, but the timer should only be reset for a follower
+		resetAndDrainTimer(rn.electionTimeoutTimer, randomTimerDuration(minElectionTimeout, maxElectionTimeout))
+	} else if rn.state == Candidate {
+		// stepdown if a leader with the same term as us is found
+		rn.stepdown()
+	}
+
+	// guard:
+	if appendEntriesRequest.PrevLogIdx > 0 && appendEntriesRequest.PrevLogTerm == NoPreviousTerm {
+		// Request is invalid, leader should never send such a thing
+		assert.Unreachable(
+			"Invalid request consistency check values",
+			map[string]any{
+				"leader":      appendEntriesRequest.LeaderId,
+				"term":        appendEntriesRequest.Term,
+				"prevLogIdx":  appendEntriesRequest.PrevLogIdx,
+				"prevLogTerm": appendEntriesRequest.PrevLogTerm,
+			},
+		)
+		rn.Log(
+			"Leader sent invalid AERequest with PrevLogIdx: %d and PrevLogTerm: %d, ignoring",
+			appendEntriesRequest.PrevLogIdx,
+			appendEntriesRequest.PrevLogTerm,
+		)
+		return
+	}
+
+	// check if log state is consistent with leader
+	if appendEntriesRequest.PrevLogTerm != NoPreviousTerm {
+		// no entry exists
+		entry, exists := rn.storage.GetLogEntry(appendEntriesRequest.PrevLogIdx)
+		if !exists {
+			rn.Log("found non-existent log entry at index %d when comparing with leader", appendEntriesRequest.PrevLogIdx)
+			resp.Success = false
+			rn.SendMessage(appendEntriesRequest.LeaderId, resp)
+			return
+		} else if entry.Term != appendEntriesRequest.PrevLogTerm {
+			rn.Log("discovered log inconsistency with leader at index %d, expected term %d, got term %d", appendEntriesRequest.PrevLogIdx, appendEntriesRequest.PrevLogTerm, entry.Term)
+			resp.Success = false
+			rn.SendMessage(appendEntriesRequest.LeaderId, resp)
+			return
+		}
+	}
+
+	// append entries from request
+	logEntryToBeAddedIdx := appendEntriesRequest.PrevLogIdx + 1
+	rn.Log("attempting to add %d entries to log starting at index %d", len(appendEntriesRequest.Entries), logEntryToBeAddedIdx)
+	for i, entry := range appendEntriesRequest.Entries {
+		logEntry, exists := rn.storage.GetLogEntry(logEntryToBeAddedIdx)
+		if !exists {
+			rn.Log("appending entry %d/%d (%+v) at index %d", i+1, len(appendEntriesRequest.Entries), entry, logEntryToBeAddedIdx)
+			rn.storage.AppendEntry(entry)
+		} else if entry.Term != logEntry.Term {
+			rn.Log("deleting entries from index %d", logEntryToBeAddedIdx)
+			rn.storage.DeleteEntriesFrom(logEntryToBeAddedIdx)
+			rn.Log("appending entry %d/%d (%+v) at index %d", i+1, len(appendEntriesRequest.Entries), entry, logEntryToBeAddedIdx)
+			rn.storage.AppendEntry(entry)
+		} else {
+			rn.Log("entry %d/%d, already exists at index %d", i+1, len(appendEntriesRequest.Entries), logEntryToBeAddedIdx)
+		}
+		logEntryToBeAddedIdx++
+	}
+
+	// update commit index
+	indexOfLastNewEntry := appendEntriesRequest.PrevLogIdx + uint64(len(appendEntriesRequest.Entries))
+	if appendEntriesRequest.LeaderCommitIdx > rn.commitIndex {
+		prevCommitIndex := rn.commitIndex
+		rn.commitIndex = min(appendEntriesRequest.LeaderCommitIdx, indexOfLastNewEntry)
+		// guard: commit index should only increase monotonically
+		if rn.commitIndex < prevCommitIndex {
+			assert.Unreachable(
+				"Non monotonic commit index",
+				map[string]any{
+					"commitIndex":          rn.commitIndex,
+					"prevCommitIndex":      prevCommitIndex,
+					"aeRequestCommitIndex": appendEntriesRequest.LeaderCommitIdx,
+					"indexOfLastNewEntry":  indexOfLastNewEntry,
+					"aeRequestSender":      appendEntriesRequest.LeaderId,
+					"aeRequestTerm":        appendEntriesRequest.Term,
+				},
+			)
+			panic(fmt.Errorf("attempting to decrease commit index"))
+		}
+	}
+
+	resp.Success = true
+	resp.MatchIndex = appendEntriesRequest.PrevLogIdx + uint64(len(appendEntriesRequest.Entries))
+
+	rn.SendMessage(appendEntriesRequest.LeaderId, resp)
+
+	// guard:
+	if rn.commitIndex > rn.storage.GetLastLogIndex() {
+		assert.Unreachable(
+			"Commit index points to entries not in log",
+			map[string]any{
+				"commitIndex":          rn.commitIndex,
+				"lastLogIndex":         rn.storage.GetLastLogIndex(),
+				"aeRequestCommitIndex": appendEntriesRequest.LeaderCommitIdx,
+				"indexOfLastNewEntry":  indexOfLastNewEntry,
+				"aeRequestSender":      appendEntriesRequest.LeaderId,
+				"aeRequestTerm":        appendEntriesRequest.Term,
+			},
+		)
+		panic(fmt.Errorf("attempting to set commit index beyond last log index"))
+	}
+
+	// apply newly committed entries
+	for i := rn.lastApplied + 1; i <= rn.commitIndex; i++ {
+		entry, exists := rn.storage.GetLogEntry(i)
+		// guard:
+		if !exists || entry == nil {
+			assert.Unreachable(
+				"Commit index points to entries not in log",
+				map[string]any{
+					"lastApplied":          rn.lastApplied,
+					"i":                    i,
+					"entryExists":          exists,
+					"entryIsNil":           entry == nil,
+					"lastLogIndex":         rn.storage.GetLastLogIndex(),
+					"aeRequestCommitIndex": appendEntriesRequest.LeaderCommitIdx,
+					"indexOfLastNewEntry":  indexOfLastNewEntry,
+					"aeRequestSender":      appendEntriesRequest.LeaderId,
+					"aeRequestTerm":        appendEntriesRequest.Term,
+				},
+			)
+			panic(fmt.Errorf("attempting to apply entry that is not in log"))
+		}
+		rn.Log("applying entry %d to state machine", i)
+		rn.applyUpdate(entry)
+	}
+	rn.lastApplied = rn.commitIndex
+
+}
+
+func (rn *RaftNodeImpl) handleAppendEntriesResponse(appendEntriesResponse *AppendEntriesResponse) {
+	currentTerm := rn.storage.GetCurrentTerm()
+
+	if !rn.isKnownPeer(appendEntriesResponse.ResponderId) {
+		rn.Log("ignoring append entries response from unknown peer: %s", appendEntriesResponse.ResponderId)
+		return
+	}
+
+	if appendEntriesResponse.Term > currentTerm {
+		// set new term to vote request term
+		rn.Log("append entries response with a higher term: %d", appendEntriesResponse.Term)
+		rn.stepdownDueToHigherTerm(appendEntriesResponse.Term)
+		return
+	}
+
+	if rn.state != Leader {
+		rn.Log("ignoring append entries response as not leader")
+		return
+	}
+
+	if appendEntriesResponse.Term < currentTerm {
+		rn.Log("ignoring append entries response with a lower term: %d", appendEntriesResponse.Term)
+		return
+	}
+
+	followerState, exists := rn.followersStateMap[appendEntriesResponse.ResponderId]
+	// guard:
+	if !exists {
+		assert.Unreachable(
+			"Peer not present in followers map",
+			map[string]any{
+				"peers":             maps.Keys(rn.peers),
+				"followers":         maps.Keys(rn.followersStateMap),
+				"followerResponder": appendEntriesResponse.ResponderId,
+			},
+		)
+		panic(fmt.Errorf("peer is not in followers map"))
+	}
+
+	// successfully received a response from this follower
+	followerState.waitingForAEResponse = false
+
+	matchIndexUpdated := false
+	if appendEntriesResponse.Success {
+		// guard:
+		if appendEntriesResponse.MatchIndex < followerState.matchIndex {
+			assert.Unreachable(
+				"Match index in response is lower than expected",
+				map[string]any{
+					"aeResponseMatchIndex": appendEntriesResponse.MatchIndex,
+					"followerMatchIndex":   followerState.matchIndex,
+					"followerResponder":    appendEntriesResponse.ResponderId,
+					"followerState":        followerState,
+				},
+			)
+			panic(fmt.Errorf("match index lower than follower match index"))
+		} else if followerState.matchIndex == appendEntriesResponse.MatchIndex {
+			// match index didn't change
+		} else {
+			matchIndexUpdated = true
+			followerState.matchIndex = appendEntriesResponse.MatchIndex
+			followerState.nextIndex = followerState.matchIndex + 1
+		}
+	} else {
+		// NOTE: this only executes if log doesn't match
+
+		// minimum next index is 1
+		if followerState.nextIndex > 1 {
+			followerState.nextIndex -= 1
+		}
+
+		// guard:
+		if followerState.nextIndex <= followerState.matchIndex {
+			// TODO maybe should consider this request invalid and ignore it?
+			// TODO maybe should add this guard before sending the response
+			assert.Unreachable(
+				"Invalid follower state, nextIndex is not greater than matchIndex",
+				map[string]any{
+					"followerResponder":    appendEntriesResponse.ResponderId,
+					"followerState":        followerState,
+					"aeResponseMatchIndex": appendEntriesResponse.MatchIndex,
+					"aeResponseTerm":       appendEntriesResponse.Term,
+				},
+			)
+			panic(fmt.Errorf("follower nextIndex <= matchIndex "))
+		}
+
+		prevLogIndex := followerState.nextIndex - 1
+		prevLogTerm := NoPreviousTerm
+		if prevLogIndex > 0 {
+			prevLogEntry, exists := rn.storage.GetLogEntry(prevLogIndex)
+			// guard:
+			if !exists {
+				assert.Unreachable(
+					"Entry for follower does not exist",
+					map[string]any{
+						"followerResponder":    appendEntriesResponse.ResponderId,
+						"followerState":        followerState,
+						"aeResponseMatchIndex": appendEntriesResponse.MatchIndex,
+						"aeResponseTerm":       appendEntriesResponse.Term,
+						"prevLogIndex":         prevLogIndex,
+					},
+				)
+				panic(fmt.Errorf("log entry does not exist"))
+			}
+			prevLogTerm = prevLogEntry.Term
+		}
+
+		entries := rn.entriesToSendToFollower(appendEntriesResponse.ResponderId)
+		rn.sendNewAppendEntryRequest(&AppendEntriesRequest{
+			Term:            currentTerm,
+			LeaderId:        rn.id,
+			Entries:         entries,
+			PrevLogIdx:      prevLogIndex,
+			PrevLogTerm:     prevLogTerm,
+			LeaderCommitIdx: rn.commitIndex,
+		}, appendEntriesResponse.ResponderId, followerState)
+	}
+
+	// commit index only is incremented if matchIndex has been changed
+	if matchIndexUpdated {
+		// guard:
+		if currentTerm != rn.storage.GetCurrentTerm() {
+			assert.Unreachable(
+				"Unexpected term",
+				map[string]any{
+					"currentTerm": currentTerm,
+					"storedTerm":  rn.storage.GetCurrentTerm(),
+				},
+			)
+			panic(fmt.Errorf("unexpected term change while processing AppendEntriesResponse"))
+		}
+
+		quorum := len(rn.peers)/2 + 1
+		lastLogIndex := rn.storage.GetLastLogIndex()
+
+		upperBound := min(appendEntriesResponse.MatchIndex, lastLogIndex)
+		lowerBound := rn.commitIndex + 1
+
+		for n := upperBound; n >= lowerBound; n-- {
+			logEntry, exists := rn.storage.GetLogEntry(n)
+			// guard:
+			if !exists {
+				assert.Unreachable(
+					"Attempting to load entry that does not exist",
+					map[string]any{
+						"index":        n,
+						"upperBound":   upperBound,
+						"lowerBound":   lowerBound,
+						"lastLogIndex": lastLogIndex,
+					},
+				)
+				panic(fmt.Errorf("attempt to load entry that does not exist"))
+			}
+
+			// NOTE: as an optimization we could just break here since it is guaranteed that all
+			// entries previous to this will have lower terms than us
+			if currentTerm != logEntry.Term {
+				rn.Log("cannot set commitIndex to %d, term mismatch", n)
+				continue
+			}
+			// count how many peer's log matches leader's upto N
+			count := 0
+			for _, followerState := range rn.followersStateMap {
+				if followerState.matchIndex >= n {
+					count++
+				}
+			}
+			// majority of peers has entry[n], commit entries up to N
+			if count >= quorum {
+				rn.commitIndex = n
+				rn.Log("commit index updated to %d", n)
+				break
+			}
+		}
+	}
+}
+
+func (rn *RaftNodeImpl) handleVoteRequest(voteRequest *VoteRequest) {
+	currentTerm := rn.storage.GetCurrentTerm()
+
+	lastLogIndex, lastLogEntryTerm := rn.storage.GetLastLogIndexAndTerm()
+
+	if !rn.isKnownPeer(voteRequest.CandidateId) {
+		rn.Log("ignoring vote request from unknown peer: %s", voteRequest.CandidateId)
+		return
+	}
+
+	if voteRequest.Term > currentTerm {
+		// set new term to vote request term
+		rn.Log("vote request with a higher term, currentTerm: %d, voteRequestTerm: %d", currentTerm, voteRequest.Term)
+		rn.stepdownDueToHigherTerm(voteRequest.Term)
+		// refresh value
+		currentTerm = rn.storage.GetCurrentTerm()
+	}
+
+	var voteGranted bool
+	if voteRequest.Term < currentTerm {
+		rn.Log("vote not granted to %s, voteRequestTerm %d < currentTerm %d", voteRequest.CandidateId, voteRequest.Term, currentTerm)
+		voteGranted = false
+	} else if rn.storage.Voted() && rn.storage.GetVotedFor() != voteRequest.CandidateId {
+		rn.Log("vote not granted to %s, already voted for %s in term %d", voteRequest.CandidateId, rn.storage.GetVotedFor(), rn.storage.GetCurrentTerm())
+		voteGranted = false
+	} else if lastLogEntryTerm > voteRequest.LastLogTerm {
+		rn.Log("vote not granted to %s, lastLogTerm %d > voteRequestLastLogTerm %d", voteRequest.CandidateId, lastLogEntryTerm, voteRequest.LastLogTerm)
+		voteGranted = false
+	} else if lastLogEntryTerm == voteRequest.LastLogTerm && lastLogIndex > voteRequest.LastLogIndex {
+		rn.Log("vote not granted to %s, lastLogIndex %d > voteRequestLastLogIndex %d with same term %d", voteRequest.CandidateId, lastLogIndex, voteRequest.LastLogIndex, lastLogEntryTerm)
+		voteGranted = false
+	} else if rn.storage.Voted() && rn.storage.GetVotedFor() == voteRequest.CandidateId {
+		rn.Log("already voted %s for them in term: %d, granted vote anyway", voteRequest.CandidateId, currentTerm)
+		voteGranted = true
+	} else {
+		rn.Log("granted vote to %s with term %d", voteRequest.CandidateId, voteRequest.Term)
+		voteGranted = true
+		rn.storage.VoteFor(voteRequest.CandidateId, voteRequest.Term)
+	}
+
+	// do not reset timer for useless vote requests
+	// timer will only be running if we are a follower
+	if voteGranted && rn.state == Follower {
+		resetAndDrainTimer(rn.electionTimeoutTimer, randomTimerDuration(minElectionTimeout, maxElectionTimeout))
+	}
+
+	// send vote response to candidate
+	resp := &VoteResponse{
+		Term:        currentTerm,
+		VoteGranted: voteGranted,
+		VoterId:     rn.id,
+	}
+	rn.SendMessage(voteRequest.CandidateId, resp)
+}
+
+func (rn *RaftNodeImpl) handleVoteResponse(voteResponse *VoteResponse) {
+	currentTerm := rn.storage.GetCurrentTerm()
+
+	if !rn.isKnownPeer(voteResponse.VoterId) {
+		rn.Log("ignoring vote response from unknown peer: %s", voteResponse.VoterId)
+		return
+	}
+
+	currentTerm = rn.storage.GetCurrentTerm()
+	if voteResponse.Term > currentTerm {
+		rn.Log("received vote response with a higher term, voteResponseTerm: %d", voteResponse.Term)
+		rn.stepdownDueToHigherTerm(voteResponse.Term)
+		return
+	} else if voteResponse.Term < currentTerm {
+		rn.Log("ignoring vote response from previous term %d", voteResponse.Term)
+		return
+	} else {
+		rn.Log("received vote response from %s", voteResponse.VoterId)
+	}
+
+	// if we are not candidate, ignore
+	if rn.state != Candidate {
+		rn.Log("ignoring vote response, not a candidate")
+		return
+	}
+
+	if !voteResponse.VoteGranted {
+		rn.Log("voter %s voted no", voteResponse.VoterId)
+		return
+	}
+
+	_, exists := rn.voteMap[voteResponse.VoterId]
+	if exists {
+		rn.Log("received duplicate vote from %s", voteResponse.VoterId)
+		return
+	}
+
+	// add vote to map
+	rn.Log("recording vote from %s", voteResponse.VoterId)
+	rn.voteMap[voteResponse.VoterId] = true
+
+	voteCount := len(rn.voteMap)
+	numPeers := len(rn.peers)
+
+	// majority
+	if voteCount >= (numPeers/2)+1 {
+		rn.ascendToLeader()
+	}
+}
+
+func (rn *RaftNodeImpl) checkFollowers() {
+	// guard:
+	if rn.state != Leader {
+		panic(fmt.Errorf("send append entries tick in state %s", rn.state))
+	}
+
+	currentTerm := rn.storage.GetCurrentTerm()
+
+	for followerId, followerState := range rn.followersStateMap {
+		var d time.Duration
+		var aeReqType string
+		if followerState.waitingForAEResponse {
+			d = aeResponseTimeoutDuration
+			aeReqType = "retry append entries request"
+		} else {
+			d = heartbeatInterval
+			aeReqType = "heartbeat"
+		}
+
+		if time.Since(followerState.aeTimestamp) > d {
+			var prevLogTerm = NoPreviousTerm
+			prevLogIndex := followerState.nextIndex - 1
+			if prevLogIndex > 0 {
+				prevLogEntry, exists := rn.storage.GetLogEntry(prevLogIndex)
+				// guard:
+				if !exists {
+					assert.Unreachable(
+						"Load entry that does not exist",
+						map[string]any{
+							"followerId":    followerId,
+							"followerState": followerState,
+							"index":         prevLogIndex,
+							"lastLogIndex":  rn.storage.GetLastLogIndex(),
+						},
+					)
+					panic(fmt.Errorf("attempting to load non-existent entry"))
+				}
+				prevLogTerm = prevLogEntry.Term
+			}
+
+			entriesToSend := rn.entriesToSendToFollower(followerId)
+			rn.sendNewAppendEntryRequest(&AppendEntriesRequest{
+				Term:            currentTerm,
+				LeaderId:        rn.id,
+				Entries:         entriesToSend,
+				PrevLogIdx:      prevLogIndex,
+				PrevLogTerm:     prevLogTerm,
+				LeaderCommitIdx: rn.commitIndex,
+			}, followerId, followerState)
+			rn.Log("sent %s to %s", aeReqType, followerId)
+		}
+	}
 }
 
 func resetAndRestartTimer(t *time.Timer, resetDuration time.Duration) {
