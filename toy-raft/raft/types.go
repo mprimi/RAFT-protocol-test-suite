@@ -108,6 +108,7 @@ type AppendEntriesRequest struct {
 	PrevLogIdx      uint64  `json:"prev_log_idx"`
 	PrevLogTerm     uint64  `json:"prev_log_term"`
 	LeaderCommitIdx uint64  `json:"leader_commit_idx"`
+	RequestId       string  `json:"request_id"`
 }
 
 func (aer *AppendEntriesRequest) Bytes() []byte {
@@ -136,6 +137,7 @@ type AppendEntriesResponse struct {
 	Success     bool   `json:"success"`
 	ResponderId string `json:"responder_id"`
 	MatchIndex  uint64 `json:"match_index"` // entries replicated on responder
+	RequestId   string `json:"request_id"`  // ID of the request this is a response to
 }
 
 func (aer *AppendEntriesResponse) Bytes() []byte {
@@ -221,6 +223,6 @@ type FollowerState struct {
 	matchIndex uint64
 	// timestamp of AppendEntries request that was last sent to the follower
 	aeTimestamp time.Time
-	// waiting for response
-	waitingForAEResponse bool
+	// Last request sent, if still unanswered
+	pendingRequest *AppendEntriesRequest
 }

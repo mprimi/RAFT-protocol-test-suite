@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/antithesishq/antithesis-sdk-go/assert"
+	"github.com/google/uuid"
 	"golang.org/x/exp/maps"
 
 	"toy-raft/network"
@@ -293,16 +294,17 @@ func (rn *RaftNodeImpl) ascendToLeader() {
 	}
 
 	// Compose and broadcast the empty AE to all followers
-	newLeaderAEReq := &AppendEntriesRequest{
+	initialAppendEntryRequest := &AppendEntriesRequest{
 		Term:            rn.storage.GetCurrentTerm(),
 		LeaderId:        rn.id,
 		Entries:         []Entry{},
 		PrevLogIdx:      prevLogIdx,
 		PrevLogTerm:     prevLogTerm,
 		LeaderCommitIdx: rn.commitIndex,
+		RequestId:       uuid.NewString(),
 	}
-	rn.BroadcastMessage(newLeaderAEReq)
-	rn.Log("broadcast first empty AE requests to followers")
+	rn.BroadcastMessage(initialAppendEntryRequest)
+	rn.Log("broadcast first (empty) AE requests to followers")
 
 	// After sending it, mark down the time it was sent
 	now := time.Now()
@@ -311,10 +313,10 @@ func (rn *RaftNodeImpl) ascendToLeader() {
 	rn.followersStateMap = make(map[string]*FollowerState, len(rn.peers))
 	for peerId := range rn.peers {
 		rn.followersStateMap[peerId] = &FollowerState{
-			nextIndex:            rn.storage.GetLastLogIndex() + 1,
-			matchIndex:           0,
-			waitingForAEResponse: true,
-			aeTimestamp:          now,
+			nextIndex:      rn.storage.GetLastLogIndex() + 1,
+			matchIndex:     0,
+			aeTimestamp:    now,
+			pendingRequest: initialAppendEntryRequest,
 		}
 	}
 
@@ -462,8 +464,8 @@ func (rn *RaftNodeImpl) LogState(format string, args ...any) {
 			b.WriteString(fmt.Sprintf(" NI:%d", followerState.nextIndex))
 			b.WriteString(fmt.Sprintf(" MI:%d", followerState.matchIndex))
 			b.WriteString(fmt.Sprintf(" AE:%s", time.Since(followerState.aeTimestamp).Round(time.Millisecond)))
-			if followerState.waitingForAEResponse {
-				b.WriteString("***")
+			if followerState.pendingRequest != nil {
+				b.WriteString(fmt.Sprintf(" (pending id: %s)", followerState.pendingRequest.RequestId))
 			}
 			b.WriteString("}")
 		}
@@ -512,6 +514,7 @@ func (rn *RaftNodeImpl) SendMessage(peerId string, msg RaftOperation) {
 	//TODO add some guards to validate outbound messages:
 	// e.g.: AppendEntryRequest
 	//         - IFF previousLogIndex > 0 then PreviousLogTerm != 0
+	//         - RequestID not empty
 	opType := msg.OpType()
 	msgEnvelope := Envelope{
 		OperationType: opType,
@@ -554,6 +557,7 @@ func (rn *RaftNodeImpl) handleAppendEntriesRequest(appendEntriesRequest *AppendE
 		Success:     false,
 		ResponderId: rn.id,
 		MatchIndex:  0,
+		RequestId:   appendEntriesRequest.RequestId,
 	}
 
 	// request's term is lower than current term, deny request
@@ -613,12 +617,18 @@ func (rn *RaftNodeImpl) handleAppendEntriesRequest(appendEntriesRequest *AppendE
 		logEntry, exists := rn.storage.GetLogEntry(logEntryToBeAddedIdx)
 		if !exists {
 			rn.Log("appending entry %d/%d (%+v) at index %d", i+1, len(appendEntriesRequest.Entries), entry, logEntryToBeAddedIdx)
-			rn.storage.AppendEntry(entry)
+			err := rn.storage.AppendEntry(entry)
+			if err != nil {
+				panic(fmt.Errorf("failed to append entry: %w", err))
+			}
 		} else if entry.Term != logEntry.Term {
 			rn.Log("deleting entries from index %d", logEntryToBeAddedIdx)
 			rn.storage.DeleteEntriesFrom(logEntryToBeAddedIdx)
 			rn.Log("appending entry %d/%d (%+v) at index %d", i+1, len(appendEntriesRequest.Entries), entry, logEntryToBeAddedIdx)
-			rn.storage.AppendEntry(entry)
+			err := rn.storage.AppendEntry(entry)
+			if err != nil {
+				panic(fmt.Errorf("failed to append entry: %w", err))
+			}
 		} else {
 			rn.Log("entry %d/%d, already exists at index %d", i+1, len(appendEntriesRequest.Entries), logEntryToBeAddedIdx)
 		}
@@ -735,8 +745,18 @@ func (rn *RaftNodeImpl) handleAppendEntriesResponse(appendEntriesResponse *Appen
 		panic(fmt.Errorf("peer is not in followers map"))
 	}
 
+	if followerState.pendingRequest == nil {
+		rn.Log("ignoring append entries response, not waiting for a response from this follower")
+		return
+	}
+
+	if followerState.pendingRequest.RequestId != appendEntriesResponse.RequestId {
+		rn.Log("ignoring append entries response for old request")
+		return
+	}
+
 	// successfully received a response from this follower
-	followerState.waitingForAEResponse = false
+	followerState.pendingRequest = nil
 
 	matchIndexUpdated := false
 	if appendEntriesResponse.Success {
@@ -806,19 +826,17 @@ func (rn *RaftNodeImpl) handleAppendEntriesResponse(appendEntriesResponse *Appen
 
 		entries := rn.entriesToSendToFollower(appendEntriesResponse.ResponderId)
 
-		rn.SendMessage(
-			appendEntriesResponse.ResponderId,
-			&AppendEntriesRequest{
-				Term:            currentTerm,
-				LeaderId:        rn.id,
-				Entries:         entries,
-				PrevLogIdx:      prevLogIndex,
-				PrevLogTerm:     prevLogTerm,
-				LeaderCommitIdx: rn.commitIndex,
-			},
-		)
+		aeRequest := &AppendEntriesRequest{
+			Term:            currentTerm,
+			LeaderId:        rn.id,
+			Entries:         entries,
+			PrevLogIdx:      prevLogIndex,
+			PrevLogTerm:     prevLogTerm,
+			LeaderCommitIdx: rn.commitIndex,
+		}
+		rn.SendMessage(appendEntriesResponse.ResponderId, aeRequest)
 		followerState.aeTimestamp = time.Now()
-		followerState.waitingForAEResponse = true
+		followerState.pendingRequest = aeRequest
 	}
 
 	// commit index only is incremented if matchIndex has been changed
@@ -994,21 +1012,14 @@ func (rn *RaftNodeImpl) maybeSendAppendEntriesToFollowers() {
 	currentTerm := rn.storage.GetCurrentTerm()
 
 	for followerId, followerState := range rn.followersStateMap {
-		// Check whether it's time to send another AE Request to this follower based on whether they are
-		// expected to respond to a previous one, or just waiting for the next AE/Heartbeat
-		var d time.Duration
-		var reason string
-		if followerState.waitingForAEResponse {
-			d = aeResponseTimeoutDuration
-			reason = "previous response timed out"
-		} else {
-			d = heartbeatInterval
-			reason = "time to heartbeat"
-		}
-
-		// Is it time to send another request to this follower?
-		if time.Since(followerState.aeTimestamp) > d {
-			rn.Log("Composing AERequest for %d (reason: %s)", followerId, reason)
+		if followerState.pendingRequest != nil && time.Since(followerState.aeTimestamp) > aeResponseTimeoutDuration {
+			// Previous request timed out, send it again
+			rn.Log("AE response timeout, re-sending last AE request to %s", followerId)
+			rn.SendMessage(followerId, followerState.pendingRequest)
+			followerState.aeTimestamp = time.Now()
+		} else if followerState.pendingRequest == nil && time.Since(followerState.aeTimestamp) > heartbeatInterval {
+			// It's time to send a new heartbeat or next AE request to this follower
+			rn.Log("Composing next AERequest for %d", followerId)
 
 			// Choose previous log index and corresponding term for this follower consistency check portion of the
 			// AE Request
@@ -1037,20 +1048,19 @@ func (rn *RaftNodeImpl) maybeSendAppendEntriesToFollowers() {
 
 			// Load entries (if any) for this follower starting at match index + 1
 			entriesToSend := rn.entriesToSendToFollower(followerId)
-
-			rn.SendMessage(
-				followerId,
-				&AppendEntriesRequest{
-					Term:            currentTerm,
-					LeaderId:        rn.id,
-					Entries:         entriesToSend,
-					PrevLogIdx:      prevLogIndex,
-					PrevLogTerm:     prevLogTerm,
-					LeaderCommitIdx: rn.commitIndex,
-				},
-			)
+			aeRequest := &AppendEntriesRequest{
+				Term:            currentTerm,
+				LeaderId:        rn.id,
+				Entries:         entriesToSend,
+				PrevLogIdx:      prevLogIndex,
+				PrevLogTerm:     prevLogTerm,
+				LeaderCommitIdx: rn.commitIndex,
+			}
+			rn.SendMessage(followerId, aeRequest)
 			followerState.aeTimestamp = time.Now()
-			followerState.waitingForAEResponse = true
+			followerState.pendingRequest = aeRequest
+		} else {
+			// Don't send a request to this follower
 		}
 	}
 }
@@ -1139,22 +1149,24 @@ func messageToString(opType OperationType, message any) string {
 			fmt.Sprintf("](%d - %dB)", len(appendEntriesRequest.Entries), totalEntriesSize),
 		)
 		msgString = fmt.Sprintf(
-			"FROM:%s T:%d PLI:%d PLT:%d LCI:%d E:%s",
+			"FROM:%s T:%d PLI:%d PLT:%d LCI:%d ID:%s E:%s",
 			appendEntriesRequest.LeaderId,
 			appendEntriesRequest.Term,
 			appendEntriesRequest.PrevLogIdx,
 			appendEntriesRequest.PrevLogTerm,
 			appendEntriesRequest.LeaderCommitIdx,
+			appendEntriesRequest.RequestId,
 			entriesSummary.String(),
 		)
 	case AppendEntriesResponseOp:
 		appendEntriesResponse := message.(*AppendEntriesResponse)
 		msgString = fmt.Sprintf(
-			"FROM:%s T:%d MI:%d S?:%v",
+			"FROM:%s T:%d MI:%d S?:%v RID:%s",
 			appendEntriesResponse.ResponderId,
 			appendEntriesResponse.Term,
 			appendEntriesResponse.MatchIndex,
 			appendEntriesResponse.Success,
+			appendEntriesResponse.RequestId,
 		)
 
 	default:

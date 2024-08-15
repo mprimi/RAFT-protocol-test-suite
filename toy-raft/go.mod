@@ -5,6 +5,7 @@ go 1.21.5
 require (
 	github.com/antithesishq/antithesis-sdk-go v0.4.0
 	github.com/dgraph-io/badger/v4 v4.2.0
+	github.com/google/uuid v1.6.0
 	github.com/nats-io/nats.go v1.36.0
 	golang.org/x/exp v0.0.0-20240719175910-8a7402abbf56
 )
