@@ -463,9 +463,14 @@ func (rn *RaftNodeImpl) LogState(format string, args ...any) {
 			b.WriteString(" " + followerName + ":{")
 			b.WriteString(fmt.Sprintf(" NI:%d", followerState.nextIndex))
 			b.WriteString(fmt.Sprintf(" MI:%d", followerState.matchIndex))
-			b.WriteString(fmt.Sprintf(" AE:%s", time.Since(followerState.aeTimestamp).Round(time.Millisecond)))
-			if followerState.pendingRequest != nil {
-				b.WriteString(fmt.Sprintf(" (pending id: %s)", followerState.pendingRequest.RequestId))
+			if followerState.pendingRequest == nil {
+				b.WriteString(fmt.Sprintf(" Next AE:%s", (heartbeatInterval - time.Since(followerState.aeTimestamp)).Round(time.Millisecond)))
+			} else {
+				b.WriteString(fmt.Sprintf(
+					" AE-TO:%s (RID:%s)",
+					(aeResponseTimeoutDuration - time.Since(followerState.aeTimestamp)).Round(time.Millisecond),
+					followerState.pendingRequest.RequestId,
+				))
 			}
 			b.WriteString("}")
 		}
@@ -1019,7 +1024,7 @@ func (rn *RaftNodeImpl) maybeSendAppendEntriesToFollowers() {
 			followerState.aeTimestamp = time.Now()
 		} else if followerState.pendingRequest == nil && time.Since(followerState.aeTimestamp) > heartbeatInterval {
 			// It's time to send a new heartbeat or next AE request to this follower
-			rn.Log("Composing next AERequest for %d", followerId)
+			rn.Log("Composing next AERequest for %s", followerId)
 
 			// Choose previous log index and corresponding term for this follower consistency check portion of the
 			// AE Request
