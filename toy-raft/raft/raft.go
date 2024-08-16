@@ -1055,6 +1055,7 @@ func (rn *RaftNodeImpl) maybeSendAppendEntriesToFollowers() {
 				PrevLogIdx:      prevLogIndex,
 				PrevLogTerm:     prevLogTerm,
 				LeaderCommitIdx: rn.commitIndex,
+				RequestId:       uuid.NewString(),
 			}
 			rn.SendMessage(followerId, aeRequest)
 			followerState.aeTimestamp = time.Now()
