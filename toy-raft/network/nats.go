@@ -26,6 +26,7 @@ func NewNatsNetwork(groupId, natsUrl string) (Network, error) {
 	nc, err := nats.Connect(
 		natsUrl,
 		nats.MaxReconnects(-1),
+		nats.RetryOnFailedConnect(true),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect: %w", err)

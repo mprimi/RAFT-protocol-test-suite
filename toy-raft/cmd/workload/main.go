@@ -28,7 +28,11 @@ func main() {
 		fatalErr(fmt.Errorf("missing required argument: group-id"))
 	}
 
-	nc, err := nats.Connect(natsUrl)
+	nc, err := nats.Connect(
+		natsUrl,
+		nats.MaxReconnects(-1),
+		nats.RetryOnFailedConnect(true),
+	)
 	if err != nil {
 		fatalErr(fmt.Errorf("failed to connect: %w", err))
 	}
