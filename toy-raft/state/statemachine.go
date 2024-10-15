@@ -1,7 +1,8 @@
 package state
 
-type StateMachine interface {
+import "io"
 
+type StateMachine interface {
 	Applied() uint64
 
 	// META
@@ -10,7 +11,7 @@ type StateMachine interface {
 	// should only be called by raft layer
 	Apply(block []byte)
 
-	CreateSnapshot() ([]byte, error)
+	CreateSnapshot(writer io.Writer) error
 
-	InstallSnapshot(snapshot []byte) error
+	InstallSnapshot(reader io.Reader) error
 }

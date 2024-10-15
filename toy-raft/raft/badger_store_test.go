@@ -209,7 +209,8 @@ func TestLogPersistence(t *testing.T) {
 	store = NewDiskStorage(replicaId, storeDir)
 
 	// check if entries are still there
-	storedEntries := store.TestGetLogEntries()
+	storedEntries, logOffset := store.TestGetLogEntries()
+	assertEqual(t, logOffset, 0)
 	if !reflect.DeepEqual(entriesToAdd, storedEntries) {
 		t.Fatalf("expected %+v, actual %+v", entriesToAdd, storedEntries)
 	}
@@ -218,4 +219,240 @@ func TestLogPersistence(t *testing.T) {
 	assertEqual(t, store.GetCurrentTerm(), term)
 	assertEqual(t, store.Voted(), true)
 	assertEqual(t, store.GetVotedFor(), vote)
+}
+
+func TestDeleteEntriesUpTo(t *testing.T) {
+
+	compareLog := func(t *testing.T, storage BadgerStorage, expectedLogEntries []Entry, expectedLogOffset uint64) {
+		assertEqual(t, storage.GetFirstLogIndex(), expectedLogOffset+1)
+		assertEqual(t, storage.GetLastLogIndex(), uint64(len(expectedLogEntries))+expectedLogOffset)
+
+		// check entries for consistency
+		logEntries, logOffset := storage.TestGetLogEntries()
+		assertEqual(t, logOffset, expectedLogOffset)
+		assertEqual(t, len(logEntries), len(expectedLogEntries))
+
+		for idx, logEntry := range logEntries {
+			assertDeepEqual(t, *logEntry, expectedLogEntries[idx])
+		}
+	}
+
+	testCases := []struct {
+		description      string
+		initialLog       []Entry
+		initialLogOffset uint64
+		deleteUpTo       uint64
+		expectedLog      []Entry
+	}{
+		{
+			description: "trim log prefix",
+			initialLog: []Entry{
+				{
+					Term: 1,
+					Cmd:  []byte("a"),
+				},
+				{
+					Term: 1,
+					Cmd:  []byte("b"),
+				},
+				{
+					Term: 2,
+					Cmd:  []byte("c"),
+				},
+			},
+			initialLogOffset: 0,
+			deleteUpTo:       2,
+			expectedLog: []Entry{
+				{
+					Term: 2,
+					Cmd:  []byte("c"),
+				},
+			},
+		},
+		{
+			description: "trim entire log",
+			initialLog: []Entry{
+				{
+					Term: 1,
+					Cmd:  []byte("a"),
+				},
+				{
+					Term: 1,
+					Cmd:  []byte("b"),
+				},
+				{
+					Term: 2,
+					Cmd:  []byte("c"),
+				},
+			},
+			initialLogOffset: 0,
+			deleteUpTo:       3,
+			expectedLog:      []Entry{},
+		},
+		{
+			description: "trim previously trimmed log",
+			initialLog: []Entry{
+				{
+					Term: 1,
+					Cmd:  []byte("d"),
+				},
+				{
+					Term: 1,
+					Cmd:  []byte("e"),
+				},
+				{
+					Term: 2,
+					Cmd:  []byte("f"),
+				},
+			},
+			initialLogOffset: 3,
+			deleteUpTo:       4,
+			expectedLog: []Entry{
+				{
+					Term: 1,
+					Cmd:  []byte("e"),
+				},
+				{
+					Term: 2,
+					Cmd:  []byte("f"),
+				},
+			},
+		},
+		{
+			description: "delete previously trimmed log",
+			initialLog: []Entry{
+				{
+					Term: 1,
+					Cmd:  []byte("d"),
+				},
+				{
+					Term: 1,
+					Cmd:  []byte("e"),
+				},
+				{
+					Term: 2,
+					Cmd:  []byte("f"),
+				},
+			},
+			initialLogOffset: 3,
+			deleteUpTo:       6,
+			expectedLog:      []Entry{},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.description, func(t *testing.T) {
+			storage := NewDiskStorage("test", t.TempDir())
+			storage.SetTerm(1)
+
+			if tc.initialLogOffset > 0 {
+				storage.setFirstLogIdx(tc.initialLogOffset + 1)
+			}
+			storage.setLastLogIdx(tc.initialLogOffset)
+
+			for _, e := range tc.initialLog {
+				if err := storage.AppendEntry(e); err != nil {
+					t.Fatal(err)
+				}
+			}
+			// check if initialization is valid
+			compareLog(t, *storage, tc.initialLog, tc.initialLogOffset)
+
+			storage.DeleteEntriesUpTo(tc.deleteUpTo)
+
+			compareLog(t, *storage, tc.expectedLog, tc.deleteUpTo)
+
+		})
+	}
+}
+
+func TestDeleteEntriesUpToPanics(t *testing.T) {
+	testCases := []struct {
+		description      string
+		initialLog       []Entry
+		initialLogOffset uint64
+		deleteUpTo       uint64
+	}{
+		{
+			description: "invalid trim index of 0",
+			initialLog: []Entry{
+				{
+					Term: 1,
+					Cmd:  []byte("d"),
+				},
+				{
+					Term: 1,
+					Cmd:  []byte("e"),
+				},
+				{
+					Term: 2,
+					Cmd:  []byte("f"),
+				},
+			},
+			initialLogOffset: 3,
+			deleteUpTo:       0,
+		},
+		{
+			description: "invalid trim index, below first log index",
+			initialLog: []Entry{
+				{
+					Term: 1,
+					Cmd:  []byte("d"),
+				},
+				{
+					Term: 1,
+					Cmd:  []byte("e"),
+				},
+				{
+					Term: 2,
+					Cmd:  []byte("f"),
+				},
+			},
+			initialLogOffset: 3,
+			deleteUpTo:       3,
+		},
+		{
+			description: "invalid trim index, above last log index",
+			initialLog: []Entry{
+				{
+					Term: 1,
+					Cmd:  []byte("d"),
+				},
+				{
+					Term: 1,
+					Cmd:  []byte("e"),
+				},
+				{
+					Term: 2,
+					Cmd:  []byte("f"),
+				},
+			},
+			initialLogOffset: 3,
+			deleteUpTo:       7,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.description, func(t *testing.T) {
+			storage := NewDiskStorage("test", t.TempDir())
+			storage.SetTerm(1)
+
+			storage.setFirstLogIdx(tc.initialLogOffset + 1)
+			storage.setLastLogIdx(tc.initialLogOffset)
+
+			for _, e := range tc.initialLog {
+				if err := storage.AppendEntry(e); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			defer func() {
+				if err := recover(); err == nil {
+					t.Fatal("expected panic")
+				}
+			}()
+
+			storage.DeleteEntriesUpTo(tc.deleteUpTo)
+		})
+	}
 }
