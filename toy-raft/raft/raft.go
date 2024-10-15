@@ -5,6 +5,10 @@ import (
 	"fmt"
 	"log"
 	"math/rand"
+	"os"
+	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -51,7 +55,8 @@ type RaftNodeImpl struct {
 	network network.Network
 
 	// -- RAFT -- //
-	state   RaftState
+	state RaftState
+	// the log
 	storage Storage
 	// set of peers including self
 	peers map[string]bool
@@ -132,6 +137,9 @@ func parseMessage(messageBytes []byte) (OperationType, any, error) {
 }
 
 func (rn *RaftNodeImpl) Start() {
+	// HACK:
+	rn.loadLatestSnapshot()
+
 	randomElectionTimeoutDuration := randomTimerDuration(minElectionTimeout, maxElectionTimeout)
 	rn.electionTimeoutTimer = time.NewTimer(randomElectionTimeoutDuration)
 
@@ -141,11 +149,17 @@ func (rn *RaftNodeImpl) Start() {
 	rn.sendAppendEntriesTicker = time.NewTicker(heartbeatInterval)
 	stopAndDrainTicker(rn.sendAppendEntriesTicker)
 
+	snapshotTicker := time.NewTicker(5 * time.Second)
+
 	go func() {
 		for {
 			select {
 			case <-rn.quitCh:
 				return
+			case <-snapshotTicker.C:
+				if err := rn.maybeSnapshot(); err != nil {
+					panic(fmt.Errorf("failed to snapshot: %w", err))
+				}
 			default:
 				rn.processOneTransistion()
 			}
@@ -838,6 +852,7 @@ func (rn *RaftNodeImpl) handleAppendEntriesResponse(appendEntriesResponse *Appen
 			PrevLogIdx:      prevLogIndex,
 			PrevLogTerm:     prevLogTerm,
 			LeaderCommitIdx: rn.commitIndex,
+			RequestId:       uuid.NewString(),
 		}
 		rn.SendMessage(appendEntriesResponse.ResponderId, aeRequest)
 		followerState.aeTimestamp = time.Now()
@@ -1180,4 +1195,107 @@ func messageToString(opType OperationType, message any) string {
 	}
 
 	return fmt.Sprintf("%s:{%s}", opType, msgString)
+}
+
+const (
+	TrimmableEntriesThreshold = 10
+	TrimTrailBuffer           = 2
+)
+
+// maybeSnapshot will create snapshot
+func (rn *RaftNodeImpl) maybeSnapshot() error {
+
+	firstLogIndex := rn.storage.GetFirstLogIndex()
+	numTrimmableEntries := rn.lastApplied - (firstLogIndex - 1)
+	if numTrimmableEntries >= TrimmableEntriesThreshold {
+		// take a snapshot
+		snapshotFile, err := os.CreateTemp("", fmt.Sprintf("snapshot_%s_%d_*", rn.id, rn.lastApplied))
+		if err != nil {
+			panic(fmt.Errorf("failed to create snapshot file: %w", err))
+		}
+		if err := rn.stateMachine.CreateSnapshot(snapshotFile); err != nil {
+			panic(fmt.Errorf("failed to write snapshot to file %s: %w", snapshotFile.Name(), err))
+		}
+		snapshotFile.Close()
+
+		// trim log now that we've snapshotted
+		trimBoundaryIndex := rn.lastApplied - TrimTrailBuffer
+		rn.storage.DeleteEntriesUpTo(trimBoundaryIndex)
+	}
+
+	/*
+		[ ] in AeReqHandling (follower):
+			[if the prevLogIndex is lt node.Committed -> ignore req]
+			will save you from doing the consistency check on entries that might have been trimmed away
+
+		[ ] in AeRespHandling (leader):
+			if resp.success is false and follower.nextIndex is lt trimThreshold -> InstallSnapshot() on follower
+			how do we handle in flight snapshots and heartbeats??
+			how do we handle timeout of InstallSnapshot()?
+	*/
+
+	return nil
+}
+
+var snapshotFileRegex = regexp.MustCompile(`snapshot_(.*)_(.*)_\d+`)
+
+func (rn *RaftNodeImpl) loadLatestSnapshot() {
+
+	tmpDir := os.TempDir()
+	tmpDirFile, err := os.Open(tmpDir)
+	if err != nil {
+		panic("error opening tmp dir")
+	}
+	defer tmpDirFile.Close()
+	dirEntries, err := tmpDirFile.ReadDir(-1)
+	if err != nil {
+		panic(err)
+	}
+
+	highestApplied := 0
+	latestSnapshotFilename := ""
+	for _, de := range dirEntries {
+		if de.Type().IsDir() {
+			continue
+		}
+		snapshotDetails := snapshotFileRegex.FindStringSubmatch(de.Name())
+		// not a valid snapshot file if it doesn't contain id and lastApplied
+		if len(snapshotDetails) != 3 {
+			continue
+		}
+		if rn.id != snapshotDetails[1] {
+			continue
+		}
+		snapshotApplied, err := strconv.Atoi(snapshotDetails[2])
+		if err != nil {
+			rn.Log("Error converting snapshot applied to int: %s", err)
+			continue
+		}
+		if snapshotApplied < int(rn.storage.GetFirstLogIndex()-1) {
+			rn.Log("ignoring outdated snapshot (applied: %d) below trim threshold: %d", snapshotApplied, rn.storage.GetFirstLogIndex())
+			continue
+		}
+		if snapshotApplied > highestApplied {
+			highestApplied = snapshotApplied
+			latestSnapshotFilename = de.Name()
+		}
+	}
+	if latestSnapshotFilename == "" {
+		rn.Log("No snapshots found")
+		return
+	}
+
+	snapshotFile, err := os.Open(filepath.Join(tmpDir, latestSnapshotFilename))
+	if err != nil {
+		panic(fmt.Errorf("error opening snapshot file %s: %w", latestSnapshotFilename, err))
+	}
+	defer snapshotFile.Close()
+
+	rn.Log("Loading snapshot from %s...", latestSnapshotFilename)
+	if err := rn.stateMachine.InstallSnapshot(snapshotFile); err != nil {
+		panic(fmt.Errorf("failed to install snapshot from file: %w", err))
+	}
+	rn.lastApplied = uint64(highestApplied)
+	// TODO: this can potentially roll back the commit index but its probably ok??
+	rn.commitIndex = rn.lastApplied
 }

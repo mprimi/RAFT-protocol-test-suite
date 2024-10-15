@@ -3,6 +3,7 @@ package state
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 )
 
@@ -71,26 +72,26 @@ func (sm *KeepLastBlocksStateMachine) Applied() uint64 {
 	return sm.appliedCount
 }
 
-func (sm *KeepLastBlocksStateMachine) CreateSnapshot() ([]byte, error) {
+func (sm *KeepLastBlocksStateMachine) CreateSnapshot(writer io.Writer) error {
 	snapshot := Snapshot{
 		Blocks: sm.blocks,
 		Offset: sm.offset,
 	}
 
-	snapshotBytes, err := json.Marshal(snapshot)
-	if err != nil {
-		return nil, err
+	enc := json.NewEncoder(writer)
+	if err := enc.Encode(snapshot); err != nil {
+		return fmt.Errorf("failed to encode snapshot: %w", err)
 	}
 
-	return snapshotBytes, nil
+	return nil
 }
 
-func (sm *KeepLastBlocksStateMachine) InstallSnapshot(snapshotBytes []byte) error {
+func (sm *KeepLastBlocksStateMachine) InstallSnapshot(reader io.Reader) error {
 	var snapshot Snapshot
 
-	err := json.Unmarshal(snapshotBytes, &snapshot)
-	if err != nil {
-		return err
+	dec := json.NewDecoder(reader)
+	if err := dec.Decode(&snapshot); err != nil {
+		return fmt.Errorf("failed to decode snapshot: %w", err)
 	}
 
 	sm.blocks = snapshot.Blocks

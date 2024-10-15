@@ -2,6 +2,7 @@ package raft
 
 import (
 	"fmt"
+	"io"
 	"log"
 	"reflect"
 	"testing"
@@ -37,11 +38,11 @@ func (sm *MockStateMachine) Apply(block []byte) {
 	sm.blocks = append(sm.blocks, block)
 }
 
-func (sm *MockStateMachine) InstallSnapshot(snapshot []byte) error {
+func (sm *MockStateMachine) InstallSnapshot(reader io.Reader) error {
 	panic("todo")
 }
 
-func (sm *MockStateMachine) CreateSnapshot() ([]byte, error) {
+func (sm *MockStateMachine) CreateSnapshot(writer io.Writer) error {
 	panic("todo")
 }
 
@@ -80,6 +81,13 @@ func assertEqual[T comparable](t *testing.T, actual T, expected T) {
 	}
 }
 
+func assertNotEqual[T comparable](t *testing.T, actual T, expected T) {
+	t.Helper()
+	if actual == expected {
+		t.Fatalf("expected %+v to not equal", actual)
+	}
+}
+
 func assertDeepEqual(t *testing.T, actual any, expected any) {
 	t.Helper()
 	if !reflect.DeepEqual(actual, expected) {
@@ -89,8 +97,15 @@ func assertDeepEqual(t *testing.T, actual any, expected any) {
 
 func assertNil(t *testing.T, actual any) {
 	t.Helper()
-	if actual != nil {
-		t.Fatalf("expected nil, actual %+v", actual)
+	if actual != nil && !reflect.ValueOf(actual).IsNil() {
+		t.Fatalf("expected %+v, actual %+v", nil, actual)
+	}
+}
+
+func assertNotNil(t *testing.T, actual any) {
+	t.Helper()
+	if actual == nil {
+		t.Fatalf("expected not nil")
 	}
 }
 
@@ -447,6 +462,10 @@ func TestAscendToLeadership(t *testing.T) {
 	assertNoErr(t, err)
 	assertEqual(t, opType, AppendEntriesRequestOp)
 	actualAppendEntriesRequest := message.(*AppendEntriesRequest)
+	// check that we sent a request
+	assertNotEqual(t, actualAppendEntriesRequest.RequestId, "")
+	// remove request id to validate the rest
+	actualAppendEntriesRequest.RequestId = ""
 	assertDeepEqual(t, actualAppendEntriesRequest, expectedAppendEntriesRequest)
 }
 
@@ -616,7 +635,8 @@ func TestFollowerHandleAppendEntries(t *testing.T) {
 		assertEqual(t, appendEntriesResponse.MatchIndex, 3)
 		assertEqual(t, raftNode.state, Follower)
 		// check log
-		log := raftNode.storage.TestGetLogEntries()
+		log, logOffset := raftNode.storage.TestGetLogEntries()
+		assertEqual(t, logOffset, 0)
 		for i := 0; i < len(log); i++ {
 			entry := log[i]
 			t.Logf("entry: %+v", entry)
@@ -674,7 +694,8 @@ func TestFollowerHandleAppendEntries(t *testing.T) {
 		assertEqual(t, appendEntriesResponse.Success, true)
 		assertEqual(t, appendEntriesResponse.MatchIndex, 3)
 		// check log
-		log := raftNode.storage.TestGetLogEntries()
+		log, logOffset := raftNode.storage.TestGetLogEntries()
+		assertEqual(t, logOffset, 0)
 		expectedLog := []Entry{
 			{Term: 1, Cmd: []byte("foo")},
 			{Term: 1, Cmd: []byte("bar")},
@@ -711,7 +732,8 @@ func TestFollowerHandleAppendEntries(t *testing.T) {
 		assertEqual(t, appendEntriesResponse.Success, true)
 		assertEqual(t, appendEntriesResponse.MatchIndex, 4)
 		// check log
-		log = raftNode.storage.TestGetLogEntries()
+		log, logOffset = raftNode.storage.TestGetLogEntries()
+		assertEqual(t, logOffset, 0)
 		expectedLog = []Entry{
 			{Term: 1, Cmd: []byte("foo")},
 			{Term: 1, Cmd: []byte("bar")},
@@ -1012,6 +1034,9 @@ func TestHandleAppendEntriesResponse(t *testing.T) {
 				otherPeerId: {
 					nextIndex:  1,
 					matchIndex: 0,
+					pendingRequest: &AppendEntriesRequest{
+						RequestId: "random-req-id12345",
+					},
 				},
 			},
 			commitIndex:              0,
@@ -1048,6 +1073,7 @@ func TestHandleAppendEntriesResponse(t *testing.T) {
 			Term:        initialTerm + 100,
 			Success:     true,
 			ResponderId: "UNKNOWN_PEER",
+			RequestId:   "foo",
 			MatchIndex:  0,
 		})
 		assertEqual(t, string(dummyNetwork.lastMessageSent), "")
@@ -1145,6 +1171,7 @@ func TestHandleAppendEntriesResponse(t *testing.T) {
 				Term:        initialTerm,
 				Success:     false,
 				ResponderId: otherPeerId,
+				RequestId:   "random-req-id12345",
 				// NOTE: not set since resp is false anyway
 				MatchIndex: 0,
 			})
@@ -1165,6 +1192,8 @@ func TestHandleAppendEntriesResponse(t *testing.T) {
 				PrevLogIdx:      expectedPrevLogIdx,
 				PrevLogTerm:     expectedPrevLogTerm,
 				LeaderCommitIdx: raftNode.commitIndex,
+				// can't predict this
+				RequestId: "",
 			}
 
 			assertEqual(t, raftNode.state, Leader)
@@ -1180,6 +1209,8 @@ func TestHandleAppendEntriesResponse(t *testing.T) {
 			}
 			assertEqual(t, opType, AppendEntriesRequestOp)
 			aeReq := msg.(*AppendEntriesRequest)
+			assertNotEqual(t, aeReq.RequestId, "")
+			expectedNewAEReq.RequestId = aeReq.RequestId
 			assertDeepEqual(t, aeReq, expectedNewAEReq)
 		}
 	})
@@ -1240,6 +1271,11 @@ func TestHandleAppendEntriesResponse(t *testing.T) {
 				raftNode = createRaftNode(id, leaderTerm, Leader, testCase.initialLeaderLog)
 				initialCommitIndex := raftNode.commitIndex
 
+				raftNode.followersStateMap[otherPeerId].pendingRequest = &AppendEntriesRequest{
+					Term:      leaderTerm,
+					LeaderId:  id,
+					RequestId: "foo-bar",
+				}
 				raftNode.followersStateMap[otherPeerId].nextIndex = testCase.initialNextIndex
 				raftNode.followersStateMap[otherPeerId].matchIndex = testCase.initialMatchIndex
 
@@ -1248,6 +1284,7 @@ func TestHandleAppendEntriesResponse(t *testing.T) {
 					Success:     true,
 					ResponderId: otherPeerId,
 					MatchIndex:  testCase.responseMatchIndex,
+					RequestId:   "foo-bar",
 				})
 
 				// leader state
@@ -1433,11 +1470,16 @@ func TestUpdateLeaderCommitIndex(t *testing.T) {
 			dummyNetwork.lastMessageSent = nil
 			leader = createLeader(leaderPeerId, LEADER_TERM, testCase.initialLeaderCommitIndex, testCase.initialLeaderLog, testCase.initialFollowerMap)
 
+			leader.followersStateMap[responderPeerId].pendingRequest = &AppendEntriesRequest{
+				RequestId: "foobar",
+			}
+
 			sendAppendEntriesResponse(&AppendEntriesResponse{
 				Term:        LEADER_TERM,
 				Success:     true,
 				ResponderId: responderPeerId,
 				MatchIndex:  testCase.responseMatchIndex,
+				RequestId:   "foobar",
 			})
 
 			// leader state
@@ -1550,15 +1592,15 @@ func TestSendAppendEntriesTicker(t *testing.T) {
 	followerToAeTimestamp := make(map[string]time.Time)
 	for follower, followerState := range node.followersStateMap {
 		followerToAeTimestamp[follower] = followerState.aeTimestamp
-		//..check waitingForAEResponse for all followers is true
-		assertEqual(t, followerState.waitingForAEResponse, true)
+		//..check request has been sent and is waiting for response
+		assertNotNil(t, followerState.pendingRequest)
 	}
 
 	//call processOneTransition#nonBlocking
 	node.processOneTransistionInternal(1 * time.Nanosecond)
 	for follower, followerState := range node.followersStateMap {
-		//..check waitingForAEResponse for all followers is true
-		assertEqual(t, followerState.waitingForAEResponse, true)
+		//..check that we are still waiting for a response
+		assertNotNil(t, followerState.pendingRequest)
 		//..check aeTimestamp for all followers didn't change
 		assertEqual(t, followerState.aeTimestamp, followerToAeTimestamp[follower])
 	}
@@ -1570,6 +1612,7 @@ func TestSendAppendEntriesTicker(t *testing.T) {
 			Success:     true,
 			ResponderId: id,
 			MatchIndex:  0,
+			RequestId:   node.followersStateMap[id].pendingRequest.RequestId,
 		}
 		msg := Envelope{
 			OperationType: AppendEntriesResponseOp,
@@ -1586,6 +1629,7 @@ func TestSendAppendEntriesTicker(t *testing.T) {
 			Success:     true,
 			ResponderId: peer1,
 			MatchIndex:  0,
+			RequestId:   node.followersStateMap[peer1].pendingRequest.RequestId,
 		}
 		msg := Envelope{
 			OperationType: AppendEntriesResponseOp,
@@ -1596,10 +1640,11 @@ func TestSendAppendEntriesTicker(t *testing.T) {
 	}
 
 	//..check 2/3 waitingForAEResponse is false, other node is true
-	assertEqual(t, node.followersStateMap[id].waitingForAEResponse, false)
-	assertEqual(t, node.followersStateMap[peer1].waitingForAEResponse, false)
+	assertNil(t, node.followersStateMap[id].pendingRequest)
+	assertNil(t, node.followersStateMap[peer1].pendingRequest)
 	// peer has not responded yet
-	assertEqual(t, node.followersStateMap[peer2].waitingForAEResponse, true)
+	assertNotNil(t, node.followersStateMap[peer2].pendingRequest)
+	peer2Request := node.followersStateMap[peer2].pendingRequest
 
 	//wait for AE timeout
 	time.Sleep(aeResponseTimeoutDuration)
@@ -1613,6 +1658,8 @@ func TestSendAppendEntriesTicker(t *testing.T) {
 	opType, _, err := parseMessage(dummyNetwork.lastMessageSent)
 	assertNoErr(t, err)
 	assertEqual(t, opType, AppendEntriesRequestOp)
+	assertNotNil(t, node.followersStateMap[peer2].pendingRequest)
+	assertEqual(t, peer2Request.RequestId, node.followersStateMap[peer2].pendingRequest.RequestId)
 
 	//wait -> send heartbeat
 	time.Sleep(heartbeatInterval)
@@ -1624,7 +1671,7 @@ func TestSendAppendEntriesTicker(t *testing.T) {
 	assertEqual(t, opType, AppendEntriesRequestOp)
 	for _, peer := range []string{id, peer1} {
 		//..check 2/3 waitingForAEResponse is true
-		assertEqual(t, node.followersStateMap[peer].waitingForAEResponse, true)
+		assertNotNil(t, node.followersStateMap[peer].pendingRequest)
 	}
 
 }

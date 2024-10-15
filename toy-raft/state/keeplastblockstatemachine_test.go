@@ -1,6 +1,8 @@
 package state
 
 import (
+	"bufio"
+	"bytes"
 	"fmt"
 	"math/rand"
 	"reflect"
@@ -37,13 +39,18 @@ func TestCreateSnapshotAndRestore(t *testing.T) {
 				oldSm.Apply(buffer)
 			}
 
-			snapshotBytes, err := oldSm.CreateSnapshot()
+			var buf bytes.Buffer
+			writer := bufio.NewWriter(&buf)
+
+			err := oldSm.CreateSnapshot(writer)
 			if err != nil {
 				t.Fatal(err)
 			}
+			writer.Flush()
 
+			reader := bufio.NewReader(&buf)
 			newSm := NewKeepLastBlocksStateMachine("old", n)
-			err = newSm.InstallSnapshot(snapshotBytes)
+			err = newSm.InstallSnapshot(reader)
 			if err != nil {
 				t.Fatal(err)
 			}
