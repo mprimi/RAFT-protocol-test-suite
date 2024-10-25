@@ -70,7 +70,7 @@ func main() {
 	// Block forever
 	for {
 		select {
-		case <-time.After(3 * time.Second):
+		case <-time.After(1 * time.Second):
 			rng.Read(buffer)
 			if err := srv.Propose(buffer); err != nil {
 				if errors.Is(err, raft.ErrNotLeader) {
