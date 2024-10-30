@@ -450,14 +450,15 @@ func (rn *RaftNodeImpl) Log(format string, args ...any) {
 	}
 
 	header := fmt.Sprintf(
-		"[RAFT %s] [%s - %s - T:%d LLI:%d C:%d A:%d] ",
+		"[RAFT %s] [%s - %s - T:%d C:%d A:%d log:%d/%d] ",
 		rn.groupId,
 		rn.id,
 		stateIcon(),
 		rn.storage.GetCurrentTerm(),
-		rn.storage.GetLastLogIndex(),
 		rn.commitIndex,
 		rn.lastApplied,
+		rn.storage.GetFirstLogIndex(),
+		rn.storage.GetLastLogIndex(),
 	)
 	log.Printf(header+format+"\n", args...)
 }
@@ -583,11 +584,14 @@ func (rn *RaftNodeImpl) handleAppendEntriesRequest(appendEntriesRequest *AppendE
 	if appendEntriesRequest.Term < currentTerm {
 		rn.SendMessage(appendEntriesRequest.LeaderId, resp)
 		return
-	} else if rn.state == Follower {
+	}
+
+	switch rn.state {
+	case Follower:
 		// refresh election timer
 		// NOTE: any state can receive an AE req, but the timer should only be reset for a follower
 		resetAndDrainTimer(rn.electionTimeoutTimer, randomTimerDuration(minElectionTimeout, maxElectionTimeout))
-	} else if rn.state == Candidate {
+	case Candidate:
 		// stepdown if a leader with the same term as us is found
 		rn.stepdown()
 	}
