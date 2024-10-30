@@ -23,6 +23,7 @@ RUN go install github.com/antithesishq/antithesis-sdk-go/tools/antithesis-go-ins
 # Instrument code (lands in /nats-server_instrumented)
 RUN mkdir -p /toy-raft_instrumented
 RUN /root/go/bin/antithesis-go-instrumentor /toy-raft /toy-raft_instrumented
+RUN /root/go/bin/antithesis-go-instrumentor -version
 
 # Build instrumented toy-raft
 WORKDIR /toy-raft_instrumented/customer

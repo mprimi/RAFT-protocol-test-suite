@@ -19,6 +19,7 @@ WORKDIR /
 
 # Install instrumentor (lands in /root/go/bin/antithesis-go-instrumentor)
 RUN go install github.com/antithesishq/antithesis-sdk-go/tools/antithesis-go-instrumentor@latest
+RUN /root/go/bin/antithesis-go-instrumentor -version
 
 # Instrument code (lands in /nats-server_instrumented)
 RUN mkdir -p /toy-raft_instrumented
