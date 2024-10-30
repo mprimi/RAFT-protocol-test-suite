@@ -712,14 +712,14 @@ func TestFollowerHandleAppendEntries(t *testing.T) {
 
 		// TODO: remove these vars and all like it, use req struct instead
 		var (
-			prevLogEntryIdx  uint64 = 2
-			prevLogEntryTerm uint64 = 1
+			prevLogEntryIdx  uint64 = 3
+			prevLogEntryTerm uint64 = 2
 		)
 		reqTerm = 2
 		duplicateAndNewAEReq := &AppendEntriesRequest{
 			Term:            reqTerm,
 			LeaderId:        leaderId,
-			Entries:         []Entry{{Term: 2, Cmd: []byte("baz")}, {Term: 2, Cmd: []byte("faz")}},
+			Entries:         []Entry{{Term: 2, Cmd: []byte("faz")}},
 			PrevLogIdx:      prevLogEntryIdx,
 			PrevLogTerm:     prevLogEntryTerm,
 			LeaderCommitIdx: leaderCommit,

@@ -616,6 +616,14 @@ func (rn *RaftNodeImpl) handleAppendEntriesRequest(appendEntriesRequest *AppendE
 		return
 	}
 
+	// NOTE: optimization to ignore outdated requests below commit index
+	if appendEntriesRequest.PrevLogIdx < rn.commitIndex {
+		// we've matched at least up to the entries we've already achieved quorum on
+		resp.MatchIndex = rn.commitIndex
+		rn.SendMessage(appendEntriesRequest.LeaderId, resp)
+		return
+	}
+
 	// check if log state is consistent with leader
 	if appendEntriesRequest.PrevLogTerm != NoPreviousTerm {
 		// no entry exists
