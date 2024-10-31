@@ -1582,7 +1582,7 @@ func TestSendAppendEntriesTicker(t *testing.T) {
 		lastApplied:              0,
 		electionTimeoutTimer:     time.NewTimer(electionTimerDuration),
 		voteResponseTimeoutTimer: time.NewTimer(A_LONG_TIME),
-		sendAppendEntriesTicker:  time.NewTicker(100 * time.Millisecond),
+		sendAppendEntriesTicker:  time.NewTicker(A_LONG_TIME),
 	}
 	node.storage.SetTerm(term)
 

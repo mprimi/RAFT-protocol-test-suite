@@ -136,8 +136,9 @@ type AppendEntriesResponse struct {
 	Term        uint64 `json:"term"`
 	Success     bool   `json:"success"`
 	ResponderId string `json:"responder_id"`
-	MatchIndex  uint64 `json:"match_index"` // entries replicated on responder
-	RequestId   string `json:"request_id"`  // ID of the request this is a response to
+	MatchIndex  uint64 `json:"match_index"`  // entries replicated on responder
+	CommitIndex uint64 `json:"commit_index"` // set only for unsuccessful ae reqs because the follower is more ahead than the leader thinks
+	RequestId   string `json:"request_id"`   // ID of the request this is a response to
 }
 
 func (aer *AppendEntriesResponse) Bytes() []byte {

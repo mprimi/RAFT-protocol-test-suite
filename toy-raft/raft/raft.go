@@ -577,6 +577,7 @@ func (rn *RaftNodeImpl) handleAppendEntriesRequest(appendEntriesRequest *AppendE
 		Success:     false,
 		ResponderId: rn.id,
 		MatchIndex:  0,
+		CommitIndex: 0,
 		RequestId:   appendEntriesRequest.RequestId,
 	}
 
@@ -619,7 +620,7 @@ func (rn *RaftNodeImpl) handleAppendEntriesRequest(appendEntriesRequest *AppendE
 	// NOTE: optimization to ignore outdated requests below commit index
 	if appendEntriesRequest.PrevLogIdx < rn.commitIndex {
 		// we've matched at least up to the entries we've already achieved quorum on
-		resp.MatchIndex = rn.commitIndex
+		resp.CommitIndex = rn.commitIndex
 		rn.SendMessage(appendEntriesRequest.LeaderId, resp)
 		return
 	}
@@ -810,11 +811,35 @@ func (rn *RaftNodeImpl) handleAppendEntriesResponse(appendEntriesResponse *Appen
 			followerState.matchIndex = appendEntriesResponse.MatchIndex
 			followerState.nextIndex = followerState.matchIndex + 1
 		}
-	} else {
-		// NOTE: this only executes if log doesn't match
+	} else if appendEntriesResponse.CommitIndex > 0 {
+		// unsuccessful ae req due to follower commit is ahead of match index, would be 0 otherwise
 
-		// minimum next index is 1
+		// guard: commit index should not be less than or equal match index
+		if appendEntriesResponse.CommitIndex <= followerState.matchIndex {
+			assert.Unreachable(
+				"Follower commit index is below follower match index",
+				map[string]any{
+					"aeResponseCommitIndex": appendEntriesResponse.CommitIndex,
+					"followerMatchIndex":    followerState.matchIndex,
+					"followerResponder":     appendEntriesResponse.ResponderId,
+					"followerState":         followerState,
+				},
+			)
+			panic(fmt.Errorf("follower commit index lower than follower match index"))
+		}
+
+		rn.Log("Follower %s rejected AE request due to higher commit index: %d", appendEntriesResponse.ResponderId, appendEntriesResponse.CommitIndex)
+		followerState.matchIndex = appendEntriesResponse.CommitIndex
+		followerState.nextIndex = appendEntriesResponse.CommitIndex + 1
+
+		// send new append entry after updating follower state
+		rn.sendAppendEntryToFollower(appendEntriesResponse.ResponderId, followerState)
+
+	} else {
+		rn.Log("Follower %s rejected AE request, lowering nextIndex...", appendEntriesResponse.ResponderId)
+		// NOTE: this only executes if log doesn't match
 		if followerState.nextIndex > 1 {
+			// minimum next index is 1
 			followerState.nextIndex -= 1
 		}
 
@@ -834,41 +859,8 @@ func (rn *RaftNodeImpl) handleAppendEntriesResponse(appendEntriesResponse *Appen
 			panic(fmt.Errorf("follower nextIndex <= matchIndex "))
 		}
 
-		prevLogIndex := followerState.nextIndex - 1
-		prevLogTerm := NoPreviousTerm
-		if prevLogIndex > 0 {
-			prevLogEntry, exists := rn.storage.GetLogEntry(prevLogIndex)
-			// guard:
-			if !exists {
-				assert.Unreachable(
-					"Entry for follower does not exist",
-					map[string]any{
-						"followerResponder":    appendEntriesResponse.ResponderId,
-						"followerState":        followerState,
-						"aeResponseMatchIndex": appendEntriesResponse.MatchIndex,
-						"aeResponseTerm":       appendEntriesResponse.Term,
-						"prevLogIndex":         prevLogIndex,
-					},
-				)
-				panic(fmt.Errorf("log entry does not exist"))
-			}
-			prevLogTerm = prevLogEntry.Term
-		}
-
-		entries := rn.entriesToSendToFollower(appendEntriesResponse.ResponderId)
-
-		aeRequest := &AppendEntriesRequest{
-			Term:            currentTerm,
-			LeaderId:        rn.id,
-			Entries:         entries,
-			PrevLogIdx:      prevLogIndex,
-			PrevLogTerm:     prevLogTerm,
-			LeaderCommitIdx: rn.commitIndex,
-			RequestId:       uuid.NewString(),
-		}
-		rn.SendMessage(appendEntriesResponse.ResponderId, aeRequest)
-		followerState.aeTimestamp = time.Now()
-		followerState.pendingRequest = aeRequest
+		// send new append entry after updating follower state
+		rn.sendAppendEntryToFollower(appendEntriesResponse.ResponderId, followerState)
 	}
 
 	// commit index only is incremented if matchIndex has been changed
@@ -1035,13 +1027,48 @@ func (rn *RaftNodeImpl) handleVoteResponse(voteResponse *VoteResponse) {
 	}
 }
 
+func (rn *RaftNodeImpl) sendAppendEntryToFollower(followerId string, followerState *FollowerState) {
+	rn.Log("Sending next AERequest for %s", followerId)
+	prevLogIndex := followerState.nextIndex - 1
+	prevLogTerm := NoPreviousTerm
+	if prevLogIndex > 0 {
+		prevLogEntry, exists := rn.storage.GetLogEntry(prevLogIndex)
+		// guard:
+		if !exists {
+			assert.Unreachable(
+				"Entry for follower does not exist",
+				map[string]any{
+					"followerId":    followerId,
+					"followerState": followerState,
+					"prevLogIndex":  prevLogIndex,
+				},
+			)
+			panic(fmt.Errorf("log entry does not exist"))
+		}
+		prevLogTerm = prevLogEntry.Term
+	}
+
+	entries := rn.entriesToSendToFollower(followerId)
+
+	aeRequest := &AppendEntriesRequest{
+		Term:            rn.storage.GetCurrentTerm(),
+		LeaderId:        rn.id,
+		Entries:         entries,
+		PrevLogIdx:      prevLogIndex,
+		PrevLogTerm:     prevLogTerm,
+		LeaderCommitIdx: rn.commitIndex,
+		RequestId:       uuid.NewString(),
+	}
+	rn.SendMessage(followerId, aeRequest)
+	followerState.aeTimestamp = time.Now()
+	followerState.pendingRequest = aeRequest
+}
+
 func (rn *RaftNodeImpl) maybeSendAppendEntriesToFollowers() {
 	// guard: this is expected to be invoked only by a node in leader state
 	if rn.state != Leader {
 		panic(fmt.Errorf("send append entries tick in state %s", rn.state))
 	}
-
-	currentTerm := rn.storage.GetCurrentTerm()
 
 	for followerId, followerState := range rn.followersStateMap {
 		if followerState.pendingRequest != nil && time.Since(followerState.aeTimestamp) > aeResponseTimeoutDuration {
@@ -1051,47 +1078,7 @@ func (rn *RaftNodeImpl) maybeSendAppendEntriesToFollowers() {
 			followerState.aeTimestamp = time.Now()
 		} else if followerState.pendingRequest == nil && time.Since(followerState.aeTimestamp) > heartbeatInterval {
 			// It's time to send a new heartbeat or next AE request to this follower
-			rn.Log("Composing next AERequest for %s", followerId)
-
-			// Choose previous log index and corresponding term for this follower consistency check portion of the
-			// AE Request
-			var prevLogTerm = NoPreviousTerm
-			prevLogIndex := followerState.nextIndex - 1
-
-			if prevLogIndex > 0 {
-				// Unless sending from the start of the log, look up the term for the last matching index
-				prevLogEntry, exists := rn.storage.GetLogEntry(prevLogIndex)
-				// guard: if looking up an entry, make sure it exists
-				if !exists {
-					assert.Unreachable(
-						"Load entry that does not exist",
-						map[string]any{
-							"followerId":    followerId,
-							"followerState": followerState,
-							"index":         prevLogIndex,
-							"lastLogIndex":  rn.storage.GetLastLogIndex(),
-						},
-					)
-					panic(fmt.Errorf("attempting to load non-existent entry"))
-				}
-				// Save the term for this entry
-				prevLogTerm = prevLogEntry.Term
-			}
-
-			// Load entries (if any) for this follower starting at match index + 1
-			entriesToSend := rn.entriesToSendToFollower(followerId)
-			aeRequest := &AppendEntriesRequest{
-				Term:            currentTerm,
-				LeaderId:        rn.id,
-				Entries:         entriesToSend,
-				PrevLogIdx:      prevLogIndex,
-				PrevLogTerm:     prevLogTerm,
-				LeaderCommitIdx: rn.commitIndex,
-				RequestId:       uuid.NewString(),
-			}
-			rn.SendMessage(followerId, aeRequest)
-			followerState.aeTimestamp = time.Now()
-			followerState.pendingRequest = aeRequest
+			rn.sendAppendEntryToFollower(followerId, followerState)
 		} else {
 			// Don't send a request to this follower
 		}
