@@ -13,5 +13,6 @@ type StateMachine interface {
 
 	CreateSnapshot(writer io.Writer) error
 
+	// must wipe state before installing
 	InstallSnapshot(reader io.Reader) error
 }

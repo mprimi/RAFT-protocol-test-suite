@@ -1,8 +1,10 @@
 package raft
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"math/rand"
 	"os"
@@ -119,6 +121,10 @@ func parseMessage(messageBytes []byte) (OperationType, any, error) {
 		message = &AppendEntriesRequest{}
 	case AppendEntriesResponseOp:
 		message = &AppendEntriesResponse{}
+	case InstallSnapshotRequestOp:
+		message = &InstallSnapshotRequest{}
+	case InstallSnapshotResponseOp:
+		message = &InstallSnapshotResponse{}
 	default:
 		return 0, nil, fmt.Errorf("unknown operation type %d", envelope.OperationType)
 	}
@@ -212,6 +218,12 @@ func (rn *RaftNodeImpl) processOneTransistionInternal(inactivityTimeout time.Dur
 
 		case VoteResponseOp:
 			rn.handleVoteResponse(message.(*VoteResponse))
+
+		case InstallSnapshotRequestOp:
+			rn.handleInstallSnapshotRequest(message.(*InstallSnapshotRequest))
+
+		case InstallSnapshotResponseOp:
+			rn.handleInstallSnapshotResponse(message.(*InstallSnapshotResponse))
 
 		default:
 			rn.Log("unknown operation type %d", opType)
@@ -1028,8 +1040,18 @@ func (rn *RaftNodeImpl) handleVoteResponse(voteResponse *VoteResponse) {
 }
 
 func (rn *RaftNodeImpl) sendAppendEntryToFollower(followerId string, followerState *FollowerState) {
-	rn.Log("Sending next AERequest for %s", followerId)
 	prevLogIndex := followerState.nextIndex - 1
+	firstLogIndex := rn.storage.GetFirstLogIndex()
+
+	// catchup a follower who needs entries below our trim threshold
+	if firstLogIndex > prevLogIndex && firstLogIndex > 1 {
+		rn.Log("Follower %s is below trim threshold (firstLogIndex: %d < prevLogIndex: %d)", followerId, firstLogIndex, prevLogIndex)
+		rn.SendSnapshot(followerId)
+		return
+	}
+
+	rn.Log("Sending next AERequest for %s", followerId)
+
 	prevLogTerm := NoPreviousTerm
 	if prevLogIndex > 0 {
 		prevLogEntry, exists := rn.storage.GetLogEntry(prevLogIndex)
@@ -1189,6 +1211,23 @@ func messageToString(opType OperationType, message any) string {
 			appendEntriesResponse.RequestId,
 		)
 
+	case InstallSnapshotRequestOp:
+		installSnapshotRequest := message.(*InstallSnapshotRequest)
+		msgString = fmt.Sprintf(
+			"FROM: %s T:%d SI:%d CE:%d",
+			installSnapshotRequest.LeaderId,
+			installSnapshotRequest.Term,
+			installSnapshotRequest.SnapshotCommitIdx,
+			len(installSnapshotRequest.CommittedEntries),
+		)
+	case InstallSnapshotResponseOp:
+		installSnapshotResponse := message.(*InstallSnapshotResponse)
+		msgString = fmt.Sprintf(
+			"FROM: %s CI:%d",
+			installSnapshotResponse.ResponderId,
+			installSnapshotResponse.CommitIdx,
+		)
+
 	default:
 		panic(fmt.Sprintf("unknown message type %s", opType))
 	}
@@ -1238,8 +1277,7 @@ func (rn *RaftNodeImpl) maybeSnapshot() error {
 
 var snapshotFileRegex = regexp.MustCompile(`snapshot_(.*)_(.*)_\d+`)
 
-func (rn *RaftNodeImpl) loadLatestSnapshot() {
-
+func (rn *RaftNodeImpl) getLatestSnapshotFilepath() (string, uint64) {
 	tmpDir := os.TempDir()
 	tmpDirFile, err := os.Open(tmpDir)
 	if err != nil {
@@ -1251,7 +1289,7 @@ func (rn *RaftNodeImpl) loadLatestSnapshot() {
 		panic(err)
 	}
 
-	highestApplied := 0
+	var highestApplied uint64 = 0
 	latestSnapshotFilename := ""
 	for _, de := range dirEntries {
 		if de.Type().IsDir() {
@@ -1265,12 +1303,12 @@ func (rn *RaftNodeImpl) loadLatestSnapshot() {
 		if rn.id != snapshotDetails[1] {
 			continue
 		}
-		snapshotApplied, err := strconv.Atoi(snapshotDetails[2])
+		snapshotApplied, err := strconv.ParseUint(snapshotDetails[2], 10, 64)
 		if err != nil {
 			rn.Log("Error converting snapshot applied to int: %s", err)
 			continue
 		}
-		if snapshotApplied < int(rn.storage.GetFirstLogIndex()-1) {
+		if snapshotApplied < rn.storage.GetFirstLogIndex()-1 {
 			rn.Log("ignoring outdated snapshot (applied: %d) below trim threshold: %d", snapshotApplied, rn.storage.GetFirstLogIndex())
 			continue
 		}
@@ -1281,20 +1319,116 @@ func (rn *RaftNodeImpl) loadLatestSnapshot() {
 	}
 	if latestSnapshotFilename == "" {
 		rn.Log("No snapshots found")
+		return "", 0
+	}
+
+	return filepath.Join(tmpDir, latestSnapshotFilename), highestApplied
+}
+
+func (rn *RaftNodeImpl) loadLatestSnapshot() {
+
+	latestSnapshotFilepath, snapshotApplied := rn.getLatestSnapshotFilepath()
+	if latestSnapshotFilepath == "" {
 		return
 	}
 
-	snapshotFile, err := os.Open(filepath.Join(tmpDir, latestSnapshotFilename))
+	snapshotFile, err := os.Open(latestSnapshotFilepath)
 	if err != nil {
-		panic(fmt.Errorf("error opening snapshot file %s: %w", latestSnapshotFilename, err))
+		panic(fmt.Errorf("error opening snapshot file %s: %w", latestSnapshotFilepath, err))
 	}
 	defer snapshotFile.Close()
 
-	rn.Log("Loading snapshot from %s...", latestSnapshotFilename)
+	rn.Log("Loading snapshot from %s...", latestSnapshotFilepath)
 	if err := rn.stateMachine.InstallSnapshot(snapshotFile); err != nil {
 		panic(fmt.Errorf("failed to install snapshot from file: %w", err))
 	}
-	rn.lastApplied = uint64(highestApplied)
+	rn.lastApplied = snapshotApplied
 	// TODO: this can potentially roll back the commit index but its probably ok??
 	rn.commitIndex = rn.lastApplied
+}
+
+func (rn *RaftNodeImpl) SendSnapshot(followerId string) {
+	latestSnapshotFilepath, snapshotApplied := rn.getLatestSnapshotFilepath()
+	if latestSnapshotFilepath == "" {
+		return
+	}
+
+	snapshotFile, err := os.Open(latestSnapshotFilepath)
+	if err != nil {
+		panic(fmt.Errorf("error opening snapshot file %s: %w", latestSnapshotFilepath, err))
+	}
+	defer snapshotFile.Close()
+
+	snapshotFileBytes, err := io.ReadAll(snapshotFile)
+	if err != nil {
+		panic(err)
+	}
+
+	installSnapshotRequest := &InstallSnapshotRequest{
+		LeaderId:          rn.id,
+		Term:              rn.storage.GetCurrentTerm(),
+		SnapshotCommitIdx: snapshotApplied,
+		Data:              snapshotFileBytes,
+		CommittedEntries:  make([][]byte, 0, rn.commitIndex-snapshotApplied),
+	}
+
+	// compose committed entries
+	for i := snapshotApplied + 1; i <= rn.commitIndex; i++ {
+		entry, exists := rn.storage.GetLogEntry(i)
+		if !exists {
+			panic(fmt.Errorf("failed to lookup committed entry at index %d", i))
+		}
+
+		installSnapshotRequest.CommittedEntries = append(installSnapshotRequest.CommittedEntries, entry.Bytes())
+	}
+
+	rn.Log("Sending a snapshot of %d bytes (up-to index: %d) and %d entries to follower %s", len(snapshotFileBytes), snapshotApplied, len(installSnapshotRequest.CommittedEntries), followerId)
+	rn.SendMessage(followerId, installSnapshotRequest)
+}
+
+func (rn *RaftNodeImpl) handleInstallSnapshotRequest(installSnapshotRequest *InstallSnapshotRequest) {
+	currentTerm := rn.storage.GetCurrentTerm()
+	if currentTerm > installSnapshotRequest.Term {
+		rn.Log("ignoring snapshot from previous term %d", installSnapshotRequest.Term)
+		return
+	}
+	if rn.state != Follower {
+		rn.stepdownDueToHigherTerm(installSnapshotRequest.Term)
+	}
+
+	if installSnapshotRequest.SnapshotCommitIdx > rn.commitIndex {
+		rn.Log("Installing snapshot, snapshotIndex: %d + %d entries", installSnapshotRequest.SnapshotCommitIdx, len(installSnapshotRequest.CommittedEntries))
+		if err := rn.stateMachine.InstallSnapshot(bytes.NewReader(installSnapshotRequest.Data)); err != nil {
+			panic(fmt.Errorf("failed to install snapshot: %w", err))
+		}
+
+		rn.commitIndex = installSnapshotRequest.SnapshotCommitIdx
+		rn.lastApplied = installSnapshotRequest.SnapshotCommitIdx
+
+		// HACK: this might not be safe
+		rn.storage.DeleteEntriesFrom(installSnapshotRequest.SnapshotCommitIdx + 1)
+
+		for _, entryBytes := range installSnapshotRequest.CommittedEntries {
+			entry := LoadEntry(entryBytes)
+			if err := rn.storage.AppendEntry(entry); err != nil {
+				panic(err)
+			}
+			rn.commitIndex++
+			rn.applyUpdate(&entry)
+			rn.lastApplied++
+		}
+
+		rn.Log("Installed snapshot, commit: %d, applied: %d", rn.commitIndex, rn.lastApplied)
+	}
+
+	// send snapshot response
+	//rn.SendMessage(installSnapshotRequest.LeaderId, &InstallSnapshotResponse{
+		//ResponderId: rn.id,
+		//CommitIdx:   rn.commitIndex,
+	//})
+}
+
+func (rn *RaftNodeImpl) handleInstallSnapshotResponse(installSnapshotResponse *InstallSnapshotResponse) {
+	rn.followersStateMap[installSnapshotResponse.ResponderId].matchIndex = installSnapshotResponse.CommitIdx
+	rn.followersStateMap[installSnapshotResponse.ResponderId].nextIndex = installSnapshotResponse.CommitIdx + 1
 }

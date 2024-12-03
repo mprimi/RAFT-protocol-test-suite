@@ -84,6 +84,8 @@ const (
 	VoteResponseOp
 	AppendEntriesRequestOp
 	AppendEntriesResponseOp
+	InstallSnapshotRequestOp
+	InstallSnapshotResponseOp
 )
 
 func (ot OperationType) String() string {
@@ -96,9 +98,73 @@ func (ot OperationType) String() string {
 		return "AppendEntriesRequest"
 	case AppendEntriesResponseOp:
 		return "AppendEntriesResponse"
+	case InstallSnapshotRequestOp:
+		return "InstallSnapshotRequest"
+	case InstallSnapshotResponseOp:
+		return "InstallSnapshotResponse"
 	default:
 		return "unknown operation type"
 	}
+}
+
+type InstallSnapshotRequest struct {
+	LeaderId string `json:"leader_id,omitempty"`
+	Term     uint64 `json:"term,omitempty"`
+	// snapshotCommitIdx + len(commitEntries) = leaderCommitIdx
+	SnapshotCommitIdx uint64 `json:"snapshot_commit_idx,omitempty"`
+
+	// snapshot content
+	Data []byte `json:"data,omitempty"`
+	// extra entries that aren't included in the snapshot (snapshotIdx+1 -> commitIdx)
+	CommittedEntries [][]byte `json:"committed_entries,omitempty"`
+}
+
+func (isr *InstallSnapshotRequest) Bytes() []byte {
+	bytes, err := json.Marshal(isr)
+	if err != nil {
+		panic(err)
+	}
+	return bytes
+}
+
+func (isr *InstallSnapshotRequest) OpType() OperationType {
+	return InstallSnapshotRequestOp
+}
+
+func LoadInstallSnapshotRequest(bytes []byte) InstallSnapshotRequest {
+	var req InstallSnapshotRequest
+	err := json.Unmarshal(bytes, &req)
+	if err != nil {
+		panic(err)
+	}
+	return req
+}
+
+type InstallSnapshotResponse struct {
+	ResponderId string `json:"responder_id,omitempty"`
+
+	CommitIdx uint64 `json:"commit_idx,omitempty"`
+}
+
+func (isr *InstallSnapshotResponse) Bytes() []byte {
+	bytes, err := json.Marshal(isr)
+	if err != nil {
+		panic(err)
+	}
+	return bytes
+}
+
+func (isr *InstallSnapshotResponse) OpType() OperationType {
+	return InstallSnapshotResponseOp
+}
+
+func LoadInstallSnapshotResponse(bytes []byte) InstallSnapshotResponse {
+	var resp InstallSnapshotResponse
+	err := json.Unmarshal(bytes, &resp)
+	if err != nil {
+		panic(err)
+	}
+	return resp
 }
 
 type AppendEntriesRequest struct {
