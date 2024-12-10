@@ -187,7 +187,7 @@ func (store *BadgerStorage) GetLogEntry(idx uint64) (*Entry, bool) {
 	err := store.db.View(func(txn *badger.Txn) error {
 		item, err := txn.Get(store.idxToKey(idx))
 		if err != nil {
-			return fmt.Errorf("failed to get store entry at index %d: %w", idx, err)
+			return err
 		}
 
 		if err := item.Value(func(val []byte) error {
