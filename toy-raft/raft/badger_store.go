@@ -155,7 +155,7 @@ func (store *BadgerStorage) setFirstLogIdx(newFirstLogIdx uint64) {
 	}
 }
 
-func (store *BadgerStorage) GetLogEntry(idx uint64) (*Entry, bool) {
+func (store *BadgerStorage) GetLogEntry(idx uint64) (Entry, bool) {
 	lastLogIdx := store.GetLastLogIndex()
 	firstLogIdx := store.GetFirstLogIndex()
 	if idx == 0 {
@@ -170,7 +170,7 @@ func (store *BadgerStorage) GetLogEntry(idx uint64) (*Entry, bool) {
 	}
 
 	if idx > lastLogIdx {
-		return nil, false
+		return Entry{}, false
 	} else if idx < firstLogIdx {
 		assert.Unreachable(
 			"Entry below trim threshold",
@@ -183,7 +183,7 @@ func (store *BadgerStorage) GetLogEntry(idx uint64) (*Entry, bool) {
 		panic("attempted to look up entry below trim threshold")
 	}
 
-	var entry *Entry
+	var entry Entry
 	err := store.db.View(func(txn *badger.Txn) error {
 		item, err := txn.Get(store.idxToKey(idx))
 		if err != nil {
@@ -191,8 +191,7 @@ func (store *BadgerStorage) GetLogEntry(idx uint64) (*Entry, bool) {
 		}
 
 		if err := item.Value(func(val []byte) error {
-			x := LoadEntry(val)
-			entry = &x
+			entry = LoadEntry(val)
 			return nil
 		}); err != nil {
 			return err
@@ -242,6 +241,7 @@ func (store *BadgerStorage) TestGetLogEntries() ([]*Entry, uint64) {
 	return entries, firstLogIdx - 1
 }
 
+// DeleteEntriesUpTo and including endlingLogIndex
 func (store *BadgerStorage) DeleteEntriesUpTo(endingLogIndex uint64) {
 	firstLogIndex := store.GetFirstLogIndex()
 	lastLogIndex := store.GetLastLogIndex()
@@ -405,6 +405,12 @@ func (store *BadgerStorage) idxToKey(idx uint64) []byte {
 
 // TODO should return index so caller can check it matches expected (alternatively, pass in the expected index)
 func (store *BadgerStorage) AppendEntry(entry Entry) error {
+	// guard: check for valid entry
+	if entry.Term == 0 {
+		assert.Unreachable("entry has term 0", nil)
+		panic("entry has term 0")
+	}
+
 	if store.GetCurrentTerm() == 0 {
 		assert.Unreachable(
 			"Append entry with zero term",
@@ -434,6 +440,44 @@ func (store *BadgerStorage) AppendEntry(entry Entry) error {
 
 	// update lastLogIdx
 	store.setLastLogIdx(entryIdx)
+
+	return nil
+}
+
+func (store *BadgerStorage) PrependEntry(entry Entry) error {
+	// guard: check for valid entry
+	if entry.Term == 0 {
+		assert.Unreachable("entry has term 0", nil)
+		panic("entry has term 0")
+	}
+
+	// guard: firstLogIdx > 1
+	firstLogIndex := store.GetFirstLogIndex()
+	if firstLogIndex <= 1 {
+		assert.Unreachable("no room to prepend", map[string]any{
+			"firstLogIdx": firstLogIndex,
+			"lastLogIdx":  store.GetLastLogIndex(),
+		})
+		panic("no room to prepend")
+	}
+
+	entryIdx := firstLogIndex - 1
+
+	key := store.idxToKey(entryIdx)
+	value := entry.Bytes()
+
+	// put in log
+	if err := store.db.Update(func(txn *badger.Txn) error {
+		if err := txn.Set(key, value); err != nil {
+			return fmt.Errorf("failed to prepend entry at index %d: %w", entryIdx, err)
+		}
+		return nil
+	}); err != nil {
+		panic(fmt.Errorf("failed to prepend entry: %w", err))
+	}
+
+	// update trim threshold
+	store.setFirstLogIdx(entryIdx)
 
 	return nil
 }

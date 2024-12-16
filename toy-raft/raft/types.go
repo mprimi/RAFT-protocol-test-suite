@@ -111,12 +111,13 @@ type InstallSnapshotRequest struct {
 	LeaderId string `json:"leader_id,omitempty"`
 	Term     uint64 `json:"term,omitempty"`
 	// snapshotCommitIdx + len(commitEntries) = leaderCommitIdx
-	SnapshotCommitIdx uint64 `json:"snapshot_commit_idx,omitempty"`
+	SnapshotCommitIdx         uint64 `json:"snapshot_commit_idx,omitempty"`
+	LastIncludedSnapshotEntry Entry  `json:"last_included_snapshot_entry,omitempty"`
 
 	// snapshot content
 	Data []byte `json:"data,omitempty"`
 	// extra entries that aren't included in the snapshot (snapshotIdx+1 -> commitIdx)
-	CommittedEntries [][]byte `json:"committed_entries,omitempty"`
+	CommittedEntries []Entry `json:"committed_entries,omitempty"`
 }
 
 func (isr *InstallSnapshotRequest) Bytes() []byte {

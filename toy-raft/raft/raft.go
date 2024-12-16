@@ -438,7 +438,7 @@ func (rn *RaftNodeImpl) requestVotes(term uint64, candidateId string) {
 	rn.BroadcastMessage(voteRequest)
 }
 
-func (rn *RaftNodeImpl) applyUpdate(update *Entry) {
+func (rn *RaftNodeImpl) applyUpdate(update Entry) {
 	rn.stateMachine.Apply(update.Cmd)
 }
 
@@ -726,14 +726,13 @@ func (rn *RaftNodeImpl) handleAppendEntriesRequest(appendEntriesRequest *AppendE
 	for i := rn.lastApplied + 1; i <= rn.commitIndex; i++ {
 		entry, exists := rn.storage.GetLogEntry(i)
 		// guard:
-		if !exists || entry == nil {
+		if !exists {
 			assert.Unreachable(
 				"Commit index points to entries not in log",
 				map[string]any{
 					"lastApplied":          rn.lastApplied,
 					"i":                    i,
 					"entryExists":          exists,
-					"entryIsNil":           entry == nil,
 					"lastLogIndex":         rn.storage.GetLastLogIndex(),
 					"aeRequestCommitIndex": appendEntriesRequest.LeaderCommitIdx,
 					"indexOfLastNewEntry":  indexOfLastNewEntry,
@@ -997,7 +996,6 @@ func (rn *RaftNodeImpl) handleVoteResponse(voteResponse *VoteResponse) {
 		return
 	}
 
-	currentTerm = rn.storage.GetCurrentTerm()
 	if voteResponse.Term > currentTerm {
 		rn.Log("received vote response with a higher term, voteResponseTerm: %d", voteResponse.Term)
 		rn.stepdownDueToHigherTerm(voteResponse.Term)
@@ -1364,22 +1362,40 @@ func (rn *RaftNodeImpl) SendSnapshot(followerId string) {
 		panic(err)
 	}
 
+	lastIncludedEntry, exists := rn.storage.GetLogEntry(snapshotApplied)
+	// guard: entry should always exist due to TrimTrailBuffer
+	if !exists {
+		assert.Unreachable("Failed to lookup last included snapshot entry", map[string]any{
+			"snapshotApplied": snapshotApplied,
+			"firstLogIdx":     rn.storage.GetFirstLogIndex(),
+			"lastLogIdx":      rn.storage.GetLastLogIndex(),
+			"commitIdx":       rn.commitIndex,
+		})
+		panic("failed to get last included snapshot entry from log")
+	}
+
 	installSnapshotRequest := &InstallSnapshotRequest{
-		LeaderId:          rn.id,
-		Term:              rn.storage.GetCurrentTerm(),
-		SnapshotCommitIdx: snapshotApplied,
-		Data:              snapshotFileBytes,
-		CommittedEntries:  make([][]byte, 0, rn.commitIndex-snapshotApplied),
+		LeaderId:                  rn.id,
+		Term:                      rn.storage.GetCurrentTerm(),
+		SnapshotCommitIdx:         snapshotApplied,
+		Data:                      snapshotFileBytes,
+		LastIncludedSnapshotEntry: lastIncludedEntry,
+		CommittedEntries:          make([]Entry, 0, rn.commitIndex-snapshotApplied),
 	}
 
 	// compose committed entries
 	for i := snapshotApplied + 1; i <= rn.commitIndex; i++ {
 		entry, exists := rn.storage.GetLogEntry(i)
 		if !exists {
-			panic(fmt.Errorf("failed to lookup committed entry at index %d", i))
+			assert.Unreachable("Failed to lookup committed entry", map[string]any{
+				"entryIndex":  i,
+				"firstLogIdx": rn.storage.GetFirstLogIndex(),
+				"lastLogIdx":  rn.storage.GetLastLogIndex(),
+			})
+			panic(fmt.Errorf("failed to lookup committed entry"))
 		}
 
-		installSnapshotRequest.CommittedEntries = append(installSnapshotRequest.CommittedEntries, entry.Bytes())
+		installSnapshotRequest.CommittedEntries = append(installSnapshotRequest.CommittedEntries, entry)
 	}
 
 	rn.Log("Sending a snapshot of %d bytes (up-to index: %d) and %d entries to follower %s", len(snapshotFileBytes), snapshotApplied, len(installSnapshotRequest.CommittedEntries), followerId)
@@ -1396,36 +1412,89 @@ func (rn *RaftNodeImpl) handleInstallSnapshotRequest(installSnapshotRequest *Ins
 		rn.stepdownDueToHigherTerm(installSnapshotRequest.Term)
 	}
 
+	/*
+		    1. install the snapshot to SM, update commit/applied
+			log = 1-15, commit = 10
+
+			snapshot -> commit = 12, CE = 2
+
+
+			log = 1-15, commit = 12
+
+			2. trim log up until snapshotCommitIdx + len(CE)
+
+			log = 15-15, commit = 12
+
+			CRASH
+
+			log = 15-15 commit = 12
+
+			3. prepend committedEntries (in reverse-order)
+
+			log = 13-15, commit = 12
+
+			4. prepend lastIncludedEntry
+
+			log = 12-15, commit = 12
+
+			5. apply committedEntries (for entry: commit++, apply++)
+
+			log = 12-15, commit = 14
+
+			6. `maybeSnapshot`
+	*/
+
+	// valid snapshot to install
 	if installSnapshotRequest.SnapshotCommitIdx > rn.commitIndex {
+
+		// 1. install the snapshot to SM, update commit/applied
 		rn.Log("Installing snapshot, snapshotIndex: %d + %d entries", installSnapshotRequest.SnapshotCommitIdx, len(installSnapshotRequest.CommittedEntries))
 		if err := rn.stateMachine.InstallSnapshot(bytes.NewReader(installSnapshotRequest.Data)); err != nil {
 			panic(fmt.Errorf("failed to install snapshot: %w", err))
 		}
+		// 2. trim log up until snapshotCommitIdx + len(CE)
+		snapshotLastIncludedEntryIndex := installSnapshotRequest.SnapshotCommitIdx + uint64(len(installSnapshotRequest.CommittedEntries))
+		rn.storage.DeleteEntriesUpTo(snapshotLastIncludedEntryIndex)
 
-		rn.commitIndex = installSnapshotRequest.SnapshotCommitIdx
-		rn.lastApplied = installSnapshotRequest.SnapshotCommitIdx
-
-		// HACK: this might not be safe
-		rn.storage.DeleteEntriesFrom(installSnapshotRequest.SnapshotCommitIdx + 1)
-
-		for _, entryBytes := range installSnapshotRequest.CommittedEntries {
-			entry := LoadEntry(entryBytes)
-			if err := rn.storage.AppendEntry(entry); err != nil {
-				panic(err)
+		// 3. prepend committedEntries (in reverse-order)
+		for i := len(installSnapshotRequest.CommittedEntries); i >= 0; i-- {
+			entry := installSnapshotRequest.CommittedEntries[i]
+			if err := rn.storage.PrependEntry(entry); err != nil {
+				panic(fmt.Errorf("failed to prepend entry: %w", err))
 			}
-			rn.commitIndex++
-			rn.applyUpdate(&entry)
-			rn.lastApplied++
 		}
 
-		rn.Log("Installed snapshot, commit: %d, applied: %d", rn.commitIndex, rn.lastApplied)
-	}
+		// 4. prepend lastIncludedEntry
+		if err := rn.storage.PrependEntry(installSnapshotRequest.LastIncludedSnapshotEntry); err != nil {
+			panic(fmt.Errorf("failed to prepend last included entry: %w", err))
+		}
 
-	// send snapshot response
-	//rn.SendMessage(installSnapshotRequest.LeaderId, &InstallSnapshotResponse{
-		//ResponderId: rn.id,
-		//CommitIdx:   rn.commitIndex,
-	//})
+		// 5. apply committedEntries and lastIncludedEntry
+		for i := rn.commitIndex + 1; i <= snapshotLastIncludedEntryIndex+1; i++ {
+			entry, exists := rn.storage.GetLogEntry(i)
+			if !exists {
+				assert.Unreachable("Failed to lookup entry", map[string]any{
+					"entryIndex":  i,
+					"firstLogIdx": rn.storage.GetFirstLogIndex(),
+					"lastLogIdx":  rn.storage.GetLastLogIndex(),
+				})
+				panic(fmt.Errorf("failed to lookup entry"))
+			}
+			rn.applyUpdate(entry)
+			rn.commitIndex++
+		}
+
+		// 6. `maybeSnapshot`
+		if err := rn.maybeSnapshot(); err != nil {
+			panic(fmt.Errorf("failed to take snapshot: %w", err))
+		}
+
+		// 7. send snapshot response
+		rn.SendMessage(installSnapshotRequest.LeaderId, &InstallSnapshotResponse{
+			ResponderId: rn.id,
+			CommitIdx:   rn.commitIndex,
+		})
+	}
 }
 
 func (rn *RaftNodeImpl) handleInstallSnapshotResponse(installSnapshotResponse *InstallSnapshotResponse) {

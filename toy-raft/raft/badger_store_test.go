@@ -116,7 +116,7 @@ func TestLog(t *testing.T) {
 						t.Fatalf("expected log entry to exist at index %d", logIdx)
 					}
 
-					if !reflect.DeepEqual(storedEntry, &entry) {
+					if !reflect.DeepEqual(storedEntry, entry) {
 						t.Fatalf("index %d, expected %+v actual %+v", logIdx, entry, storedEntry)
 					}
 				}
@@ -455,4 +455,65 @@ func TestDeleteEntriesUpToPanics(t *testing.T) {
 			storage.DeleteEntriesUpTo(tc.deleteUpTo)
 		})
 	}
+}
+
+func TestPrependEntry(t *testing.T) {
+	compareLog := func(t *testing.T, storage *BadgerStorage, expectedLogEntries []Entry, expectedFirstLogIndex uint64, expectedLastLogIndex uint64) {
+		t.Helper()
+		assertEqual(t, storage.GetFirstLogIndex(), expectedFirstLogIndex)
+		assertEqual(t, storage.GetLastLogIndex(), expectedLastLogIndex)
+
+		// check entries for consistency
+		for i := expectedFirstLogIndex; i <= expectedLastLogIndex; i++ {
+			entry, exists := storage.GetLogEntry(i)
+			if !exists {
+				t.Fatalf("failed to get entry %d", i)
+			}
+			assertDeepEqual(t, entry, expectedLogEntries[i-expectedFirstLogIndex])
+		}
+	}
+
+	storage := NewDiskStorage("test", t.TempDir())
+	storage.SetTerm(1)
+
+	initialLog := []Entry{
+		{
+			Term: 1,
+			Cmd:  []byte("a"),
+		},
+		{
+			Term: 1,
+			Cmd:  []byte("b"),
+		},
+		{
+			Term: 2,
+			Cmd:  []byte("c"),
+		},
+		{
+			Term: 2,
+			Cmd:  []byte("d"),
+		},
+		{
+			Term: 2,
+			Cmd:  []byte("e"),
+		},
+	}
+
+	// populate with 5 entries
+	for _, entry := range initialLog {
+		if err := storage.AppendEntry(entry); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// trim 2
+	storage.DeleteEntriesUpTo(2)
+	compareLog(t, storage, initialLog[2:], 3, 5)
+
+	// prepend them both back
+	storage.PrependEntry(initialLog[1])
+	storage.PrependEntry(initialLog[0])
+
+	// check that its equal to initial log
+	compareLog(t, storage, initialLog, 1, 5)
 }
